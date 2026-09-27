@@ -24,6 +24,8 @@ function stripJsonComments(json: string): string {
 
 function getConfigPaths(directory: string): string[] {
   return [
+    path.join(directory, "opencode.json"),
+    path.join(directory, "opencode.jsonc"),
     path.join(directory, ".opencode", "opencode.json"),
     path.join(directory, ".opencode", "opencode.jsonc"),
     path.join(directory, ".opencode.json"),
@@ -32,15 +34,22 @@ function getConfigPaths(directory: string): string[] {
   ];
 }
 
+function getPluginEntries(config: OpencodeConfig): string[] {
+  const entries: string[] = [];
+  for (const entry of [...(config.plugins ?? []), ...(config.plugin ?? [])]) {
+    if (typeof entry === "string") entries.push(entry);
+    else if (entry && typeof entry.package === "string") entries.push(entry.package);
+  }
+  return entries;
+}
+
 export function getLocalDevPath(directory: string): string | null {
   for (const configPath of getConfigPaths(directory)) {
     try {
       if (!fs.existsSync(configPath)) continue;
       const content = fs.readFileSync(configPath, "utf-8");
       const config = JSON.parse(stripJsonComments(content)) as OpencodeConfig;
-      const plugins = config.plugin ?? [];
-
-      for (const entry of plugins) {
+      for (const entry of getPluginEntries(config)) {
         if (entry.startsWith("file://") && entry.includes(PACKAGE_NAME)) {
           try {
             return fileURLToPath(entry);
@@ -111,9 +120,7 @@ export function findPluginEntry(directory: string): PluginEntryInfo | null {
       if (!fs.existsSync(configPath)) continue;
       const content = fs.readFileSync(configPath, "utf-8");
       const config = JSON.parse(stripJsonComments(content)) as OpencodeConfig;
-      const plugins = config.plugin ?? [];
-
-      for (const entry of plugins) {
+      for (const entry of getPluginEntries(config)) {
         if (entry === PACKAGE_NAME) {
           return { entry, isPinned: false, pinnedVersion: null, configPath };
         }
@@ -165,19 +172,63 @@ export function updatePinnedVersion(configPath: string, oldEntry: string, newVer
     const content = fs.readFileSync(configPath, "utf-8");
     const newEntry = `${PACKAGE_NAME}@${newVersion}`;
 
-    const pluginMatch = content.match(/"plugin"\s*:\s*\[/);
+    const config = JSON.parse(stripJsonComments(content)) as OpencodeConfig;
+    const pluginKey = (["plugins", "plugin"] as const).find((key) =>
+      getPluginEntries({ [key]: config[key] } as OpencodeConfig).includes(oldEntry),
+    );
+    if (!pluginKey) {
+      logAutoUpdate(`Entry "${oldEntry}" not found in a plugin list of ${configPath}`);
+      return false;
+    }
+
+    const escapedKey = pluginKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pluginMatch = content.match(new RegExp(`"${escapedKey}"\\s*:\\s*\\[`));
     if (!pluginMatch || pluginMatch.index === undefined) {
-      logAutoUpdate(`No "plugin" array found in ${configPath}`);
+      logAutoUpdate(`No "${pluginKey}" array found in ${configPath}`);
       return false;
     }
 
     const startIdx = pluginMatch.index + pluginMatch[0].length;
     let bracketCount = 1;
     let endIdx = startIdx;
+    let quote: string | undefined;
+    let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
 
     for (let i = startIdx; i < content.length && bracketCount > 0; i++) {
-      if (content[i] === "[") bracketCount++;
-      else if (content[i] === "]") bracketCount--;
+      const char = content[i];
+      const next = content[i + 1];
+      if (lineComment) {
+        if (char === "\n") lineComment = false;
+        endIdx = i;
+        continue;
+      }
+      if (blockComment) {
+        if (char === "*" && next === "/") {
+          blockComment = false;
+          i++;
+        }
+        endIdx = i;
+        continue;
+      }
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = undefined;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === "/" && next === "/") {
+        lineComment = true;
+        i++;
+      } else if (char === "/" && next === "*") {
+        blockComment = true;
+        i++;
+      } else if (char === "[") {
+        bracketCount++;
+      } else if (char === "]") {
+        bracketCount--;
+      }
       endIdx = i;
     }
 
@@ -189,7 +240,7 @@ export function updatePinnedVersion(configPath: string, oldEntry: string, newVer
     const regex = new RegExp(`["']${escapedOldEntry}["']`);
 
     if (!regex.test(pluginArrayContent)) {
-      logAutoUpdate(`Entry "${oldEntry}" not found in plugin array of ${configPath}`);
+      logAutoUpdate(`Entry "${oldEntry}" not found in "${pluginKey}" array of ${configPath}`);
       return false;
     }
 

@@ -21,7 +21,9 @@ export interface UpdateConfigResult {
 
 export interface OpencodeConfig {
   $schema?: string;
+  plugins?: PluginConfigEntry[];
   plugin?: string[];
+  providers?: Record<string, unknown>;
   provider?: {
     google?: {
       models?: Record<string, unknown>;
@@ -32,9 +34,13 @@ export interface OpencodeConfig {
   [key: string]: unknown;
 }
 
+type PluginConfigEntry = string | { package: string; options?: Record<string, unknown> };
+
 export interface UpdateConfigOptions {
   /** Override the config file path (for testing) */
   configPath?: string;
+  /** Select a syntax explicitly; auto-detect preserves an existing config's API generation. */
+  format?: "auto" | "v1" | "v2";
 }
 
 // =============================================================================
@@ -93,7 +99,8 @@ export function getOpencodeConfigPath(): string {
  *
  * This function:
  * 1. Reads existing opencode.json/opencode.jsonc (or creates default structure)
- * 2. Replaces `provider.google.models` with plugin models
+ * 2. Adds model definitions for V1 configs, where models must be declared
+ *    manually. V2 registers models through the plugin API.
  * 3. Writes back to disk with proper formatting
  *
  * Preserves:
@@ -112,7 +119,7 @@ export async function updateOpencodeConfig(
   try {
     let config: OpencodeConfig;
 
-    // Read existing config or create default
+    // Read existing config or create a native V2 structure.
     if (existsSync(configPath)) {
       const content = readFileSync(configPath, "utf-8");
       config = JSON.parse(stripJsonCommentsAndTrailingCommas(content)) as OpencodeConfig;
@@ -120,8 +127,7 @@ export async function updateOpencodeConfig(
       // Create default config structure
       config = {
         $schema: SCHEMA_URL,
-        plugin: [],
-        provider: {},
+        ...(options.format === "v1" ? { plugin: [], provider: {} } : { plugins: [] }),
       };
     }
 
@@ -130,29 +136,30 @@ export async function updateOpencodeConfig(
       config.$schema = SCHEMA_URL;
     }
 
-    // Ensure plugin array exists and contains our plugin
-    if (!Array.isArray(config.plugin)) {
-      config.plugin = [];
-    }
-
-    // Check if plugin is already in the list (any version)
-    const hasPlugin = config.plugin.some((p) =>
-      p.includes("opencode-antigravity-auth")
+    // Existing V1 configs keep their legacy provider/model declarations. New
+    // and native V2 configs use `plugins`; V2 models are registered at runtime.
+    const legacyConfig = options.format === "v1" || (
+      options.format !== "v2" &&
+      !Array.isArray(config.plugins) &&
+      (Array.isArray(config.plugin) || config.provider !== undefined)
     );
-    if (!hasPlugin) {
-      config.plugin.push(PLUGIN_NAME);
-    }
+    if (legacyConfig) {
+      if (!Array.isArray(config.plugin)) config.plugin = [];
+      if (!config.plugin.some((entry) => entry.includes("opencode-antigravity-auth"))) {
+        config.plugin.push(PLUGIN_NAME);
+      }
 
-    // Ensure provider.google structure exists
-    if (!config.provider) {
-      config.provider = {};
+      if (!config.provider) config.provider = {};
+      if (!config.provider.google) config.provider.google = {};
+      config.provider.google.models = { ...OPENCODE_MODEL_DEFINITIONS };
+    } else {
+      if (!Array.isArray(config.plugins)) config.plugins = [];
+      const hasPlugin = config.plugins.some((entry) => {
+        const packageName = typeof entry === "string" ? entry : entry?.package;
+        return packageName?.includes("opencode-antigravity-auth") ?? false;
+      });
+      if (!hasPlugin) config.plugins.push(PLUGIN_NAME);
     }
-    if (!config.provider.google) {
-      config.provider.google = {};
-    }
-
-    // Replace google models with plugin models
-    config.provider.google.models = { ...OPENCODE_MODEL_DEFINITIONS };
 
     // Ensure config directory exists
     const configDir = dirname(configPath);

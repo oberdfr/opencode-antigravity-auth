@@ -143,7 +143,7 @@ export async function promptLoginMode(existingAccounts: ExistingAccountInfo[]): 
         return { mode: "fresh", deleteAll: true };
 
       case "configure-models": {
-        const result = await updateOpencodeConfig();
+        const result = await updateOpencodeConfig({ format: "v1" });
         if (result.success) {
           console.log(`\n✓ Models configured in ${result.configPath}\n`);
         } else {

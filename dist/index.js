@@ -1796,29 +1796,29 @@ async function updateOpencodeConfig(options = {}) {
     } else {
       config = {
         $schema: SCHEMA_URL,
-        plugin: [],
-        provider: {}
+        ...options.format === "v1" ? { plugin: [], provider: {} } : { plugins: [] }
       };
     }
     if (!config.$schema) {
       config.$schema = SCHEMA_URL;
     }
-    if (!Array.isArray(config.plugin)) {
-      config.plugin = [];
+    const legacyConfig = options.format === "v1" || options.format !== "v2" && !Array.isArray(config.plugins) && (Array.isArray(config.plugin) || config.provider !== void 0);
+    if (legacyConfig) {
+      if (!Array.isArray(config.plugin)) config.plugin = [];
+      if (!config.plugin.some((entry) => entry.includes("opencode-antigravity-auth"))) {
+        config.plugin.push(PLUGIN_NAME);
+      }
+      if (!config.provider) config.provider = {};
+      if (!config.provider.google) config.provider.google = {};
+      config.provider.google.models = { ...OPENCODE_MODEL_DEFINITIONS };
+    } else {
+      if (!Array.isArray(config.plugins)) config.plugins = [];
+      const hasPlugin = config.plugins.some((entry) => {
+        const packageName = typeof entry === "string" ? entry : entry?.package;
+        return packageName?.includes("opencode-antigravity-auth") ?? false;
+      });
+      if (!hasPlugin) config.plugins.push(PLUGIN_NAME);
     }
-    const hasPlugin = config.plugin.some(
-      (p) => p.includes("opencode-antigravity-auth")
-    );
-    if (!hasPlugin) {
-      config.plugin.push(PLUGIN_NAME);
-    }
-    if (!config.provider) {
-      config.provider = {};
-    }
-    if (!config.provider.google) {
-      config.provider.google = {};
-    }
-    config.provider.google.models = { ...OPENCODE_MODEL_DEFINITIONS };
     const configDir = dirname2(configPath);
     if (!existsSync2(configDir)) {
       mkdirSync3(configDir, { recursive: true });
@@ -1935,7 +1935,7 @@ async function promptLoginMode(existingAccounts) {
       case "delete-all":
         return { mode: "fresh", deleteAll: true };
       case "configure-models": {
-        const result = await updateOpencodeConfig();
+        const result = await updateOpencodeConfig({ format: "v1" });
         if (result.success) {
           console.log(`
 \u2713 Models configured in ${result.configPath}
@@ -4369,14 +4369,14 @@ function extractUsageMetadata(body) {
   if (!usage || typeof usage !== "object") {
     return null;
   }
-  const asRecord = usage;
+  const asRecord2 = usage;
   const toNumber = (value) => typeof value === "number" && Number.isFinite(value) ? value : void 0;
   return {
-    totalTokenCount: toNumber(asRecord.totalTokenCount),
-    promptTokenCount: toNumber(asRecord.promptTokenCount),
-    candidatesTokenCount: toNumber(asRecord.candidatesTokenCount),
-    cachedContentTokenCount: toNumber(asRecord.cachedContentTokenCount),
-    thoughtsTokenCount: toNumber(asRecord.thoughtsTokenCount)
+    totalTokenCount: toNumber(asRecord2.totalTokenCount),
+    promptTokenCount: toNumber(asRecord2.promptTokenCount),
+    candidatesTokenCount: toNumber(asRecord2.candidatesTokenCount),
+    cachedContentTokenCount: toNumber(asRecord2.cachedContentTokenCount),
+    thoughtsTokenCount: toNumber(asRecord2.thoughtsTokenCount)
   };
 }
 function extractUsageFromSsePayload(payload) {
@@ -9177,6 +9177,8 @@ function stripJsonComments(json) {
 }
 function getConfigPaths(directory) {
   return [
+    path3.join(directory, "opencode.json"),
+    path3.join(directory, "opencode.jsonc"),
     path3.join(directory, ".opencode", "opencode.json"),
     path3.join(directory, ".opencode", "opencode.jsonc"),
     path3.join(directory, ".opencode.json"),
@@ -9184,14 +9186,21 @@ function getConfigPaths(directory) {
     USER_OPENCODE_CONFIG_JSONC
   ];
 }
+function getPluginEntries(config) {
+  const entries = [];
+  for (const entry of [...config.plugins ?? [], ...config.plugin ?? []]) {
+    if (typeof entry === "string") entries.push(entry);
+    else if (entry && typeof entry.package === "string") entries.push(entry.package);
+  }
+  return entries;
+}
 function getLocalDevPath(directory) {
   for (const configPath of getConfigPaths(directory)) {
     try {
       if (!fs3.existsSync(configPath)) continue;
       const content = fs3.readFileSync(configPath, "utf-8");
       const config = JSON.parse(stripJsonComments(content));
-      const plugins = config.plugin ?? [];
-      for (const entry of plugins) {
+      for (const entry of getPluginEntries(config)) {
         if (entry.startsWith("file://") && entry.includes(PACKAGE_NAME)) {
           try {
             return fileURLToPath(entry);
@@ -9249,8 +9258,7 @@ function findPluginEntry(directory) {
       if (!fs3.existsSync(configPath)) continue;
       const content = fs3.readFileSync(configPath, "utf-8");
       const config = JSON.parse(stripJsonComments(content));
-      const plugins = config.plugin ?? [];
-      for (const entry of plugins) {
+      for (const entry of getPluginEntries(config)) {
         if (entry === PACKAGE_NAME) {
           return { entry, isPinned: false, pinnedVersion: null, configPath };
         }
@@ -9296,17 +9304,60 @@ function updatePinnedVersion(configPath, oldEntry, newVersion) {
   try {
     const content = fs3.readFileSync(configPath, "utf-8");
     const newEntry = `${PACKAGE_NAME}@${newVersion}`;
-    const pluginMatch = content.match(/"plugin"\s*:\s*\[/);
+    const config = JSON.parse(stripJsonComments(content));
+    const pluginKey = ["plugins", "plugin"].find(
+      (key) => getPluginEntries({ [key]: config[key] }).includes(oldEntry)
+    );
+    if (!pluginKey) {
+      logAutoUpdate(`Entry "${oldEntry}" not found in a plugin list of ${configPath}`);
+      return false;
+    }
+    const escapedKey = pluginKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pluginMatch = content.match(new RegExp(`"${escapedKey}"\\s*:\\s*\\[`));
     if (!pluginMatch || pluginMatch.index === void 0) {
-      logAutoUpdate(`No "plugin" array found in ${configPath}`);
+      logAutoUpdate(`No "${pluginKey}" array found in ${configPath}`);
       return false;
     }
     const startIdx = pluginMatch.index + pluginMatch[0].length;
     let bracketCount = 1;
     let endIdx = startIdx;
+    let quote;
+    let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
     for (let i = startIdx; i < content.length && bracketCount > 0; i++) {
-      if (content[i] === "[") bracketCount++;
-      else if (content[i] === "]") bracketCount--;
+      const char = content[i];
+      const next = content[i + 1];
+      if (lineComment) {
+        if (char === "\n") lineComment = false;
+        endIdx = i;
+        continue;
+      }
+      if (blockComment) {
+        if (char === "*" && next === "/") {
+          blockComment = false;
+          i++;
+        }
+        endIdx = i;
+        continue;
+      }
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === quote) quote = void 0;
+      } else if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === "/" && next === "/") {
+        lineComment = true;
+        i++;
+      } else if (char === "/" && next === "*") {
+        blockComment = true;
+        i++;
+      } else if (char === "[") {
+        bracketCount++;
+      } else if (char === "]") {
+        bracketCount--;
+      }
       endIdx = i;
     }
     const before = content.slice(0, startIdx);
@@ -9315,7 +9366,7 @@ function updatePinnedVersion(configPath, oldEntry, newVersion) {
     const escapedOldEntry = oldEntry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const regex = new RegExp(`["']${escapedOldEntry}["']`);
     if (!regex.test(pluginArrayContent)) {
-      logAutoUpdate(`Entry "${oldEntry}" not found in plugin array of ${configPath}`);
+      logAutoUpdate(`Entry "${oldEntry}" not found in "${pluginKey}" array of ${configPath}`);
       return false;
     }
     const updatedPluginArray = pluginArrayContent.replace(regex, `"${newEntry}"`);
@@ -12829,8 +12880,456 @@ function isExplicitQuotaFromUrl(urlString) {
   return explicitQuota ?? false;
 }
 
+// src/plugin/v2.ts
+import { Plugin, Provider as Provider2 } from "@opencode/plugin";
+
+// src/plugin/v2-proxy.ts
+import { randomBytes as randomBytes3 } from "node:crypto";
+import { createServer as createServer2 } from "node:http";
+import { Readable } from "node:stream";
+var TARGET_HEADER = "x-opencode-antigravity-target";
+var TOKEN_HEADER = "x-opencode-antigravity-token";
+var HOP_BY_HOP_HEADERS = /* @__PURE__ */ new Set([
+  "connection",
+  "content-length",
+  "host",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade"
+]);
+async function startAntigravityProxy(getFetch) {
+  const token = randomBytes3(32).toString("hex");
+  const server = createServer2((request, response) => {
+    void handleRequest(request, response, token, getFetch).catch((error) => {
+      if (response.headersSent) {
+        response.destroy(error instanceof Error ? error : void 0);
+        return;
+      }
+      response.writeHead(502, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "Antigravity proxy request failed" }));
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await closeServer(server);
+    throw new Error("Could not determine Antigravity proxy address");
+  }
+  server.unref();
+  return {
+    url: `http://127.0.0.1:${address.port}/generate`,
+    token,
+    close: () => closeServer(server)
+  };
+}
+async function handleRequest(incoming, outgoing, expectedToken, getFetch) {
+  const token = incoming.headers[TOKEN_HEADER];
+  const target = incoming.headers[TARGET_HEADER];
+  if (token !== expectedToken || typeof target !== "string" || incoming.url !== "/generate") {
+    outgoing.writeHead(404);
+    outgoing.end();
+    return;
+  }
+  let targetURL;
+  try {
+    targetURL = new URL(target);
+  } catch {
+    outgoing.writeHead(400);
+    outgoing.end("Invalid target URL");
+    return;
+  }
+  if (targetURL.protocol !== "https:" || targetURL.hostname !== "generativelanguage.googleapis.com") {
+    outgoing.writeHead(403);
+    outgoing.end("Target is not an allowed Google Generative Language endpoint");
+    return;
+  }
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming.headers)) {
+    if (HOP_BY_HOP_HEADERS.has(name) || name === TARGET_HEADER || name === TOKEN_HEADER || value === void 0) {
+      continue;
+    }
+    headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+  }
+  const controller = new AbortController();
+  incoming.once("aborted", () => controller.abort(new Error("OpenCode request was aborted")));
+  const method = incoming.method ?? "POST";
+  const hasBody = method !== "GET" && method !== "HEAD";
+  const init = {
+    method,
+    headers,
+    signal: controller.signal
+  };
+  if (hasBody) {
+    init.body = Readable.toWeb(incoming);
+    init.duplex = "half";
+  }
+  const request = new Request(targetURL, init);
+  const response = await (await getFetch())(request);
+  const responseHeaders = {};
+  response.headers.forEach((value, name) => {
+    responseHeaders[name] = value;
+  });
+  outgoing.writeHead(response.status, responseHeaders);
+  if (!response.body) {
+    outgoing.end();
+    return;
+  }
+  const stream = Readable.fromWeb(response.body);
+  stream.once("error", (error) => outgoing.destroy(error));
+  stream.pipe(outgoing);
+}
+function closeServer(server) {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+// src/plugin/v2-adapters.ts
+import { Integration, Model } from "@opencode/plugin";
+var OAUTH_METHOD_ID = "antigravity";
+async function completeOAuth(resultPromise) {
+  const result = await resultPromise;
+  if (result.type !== "success") throw new Error(result.error);
+  return {
+    type: "oauth",
+    methodID: Integration.MethodID.make(OAUTH_METHOD_ID),
+    refresh: result.refresh,
+    access: result.access,
+    expires: result.expires,
+    metadata: {
+      ...result.email ? { email: result.email } : {},
+      ...result.projectId ? { projectId: result.projectId } : {}
+    }
+  };
+}
+function toV2Model(providerID, id, definition) {
+  const model = Model.Info.default(providerID, Model.ID.make(id));
+  return {
+    ...model,
+    name: definition.name,
+    limit: definition.limit,
+    capabilities: {
+      tools: true,
+      input: definition.modalities.input,
+      output: definition.modalities.output
+    },
+    variants: Object.entries(definition.variants ?? {}).map(([variantID, variant]) => ({
+      id: Model.VariantID.make(variantID),
+      settings: {
+        ...variant.thinkingLevel ? { thinkingLevel: variant.thinkingLevel } : {},
+        ...variant.thinkingConfig ? { thinkingConfig: variant.thinkingConfig } : {}
+      }
+    }))
+  };
+}
+
+// src/plugin/v2.ts
+var PLUGIN_ID = "opencode-antigravity-auth";
+var OAUTH_METHOD_ID2 = "antigravity";
+var modelIDs = new Set(Object.keys(OPENCODE_MODEL_DEFINITIONS));
+var AntigravityV2Plugin = Plugin.define({
+  id: PLUGIN_ID,
+  async setup(ctx) {
+    const client = createLegacyClient(ctx);
+    const legacyPlugin = await createAntigravityPlugin(ANTIGRAVITY_PROVIDER_ID)({
+      client,
+      directory: ctx.location.directory
+    });
+    await registerOAuth(ctx, legacyPlugin, client);
+    await registerModels(ctx);
+    let fetchPromise;
+    const proxy = await startAntigravityProxy(async () => {
+      fetchPromise ??= createLegacyFetch(ctx, legacyPlugin, client);
+      return fetchPromise;
+    });
+    await ctx.session.hook(
+      "http.request",
+      (event) => {
+        if (!modelIDs.has(event.model.id)) return;
+        let target;
+        try {
+          target = new URL(event.request.url);
+        } catch {
+          return;
+        }
+        if (target.protocol !== "https:" || target.hostname !== "generativelanguage.googleapis.com") return;
+        const headers = new Headers(event.request.headers);
+        headers.set("x-opencode-antigravity-target", target.toString());
+        headers.set("x-opencode-antigravity-token", proxy.token);
+        const init = {
+          method: event.request.method,
+          headers,
+          signal: event.request.signal
+        };
+        if (event.request.body && event.request.method !== "GET" && event.request.method !== "HEAD") {
+          init.body = event.request.body;
+          init.duplex = "half";
+        }
+        event.request = new Request(proxy.url, init);
+      },
+      { providerID: ANTIGRAVITY_PROVIDER_ID }
+    );
+    await registerSearchTool(ctx, client);
+    const eventController = new AbortController();
+    void subscribeEvents(ctx, legacyPlugin, eventController.signal);
+    return async () => {
+      eventController.abort();
+      await proxy.close();
+    };
+  }
+});
+async function registerOAuth(ctx, plugin, client) {
+  const authMethod = plugin.auth.methods.find((method) => method.type === "oauth");
+  if (!authMethod?.authorize) {
+    throw new Error("The Antigravity OAuth method could not be initialized");
+  }
+  await ctx.integration.transform((editor) => {
+    editor.method.update({
+      integrationID: ANTIGRAVITY_PROVIDER_ID,
+      method: {
+        id: OAUTH_METHOD_ID2,
+        type: "oauth",
+        label: authMethod.label
+      },
+      authorize: async () => {
+        const authorization = await authMethod.authorize?.();
+        if (!authorization) throw new Error("Antigravity authorization did not return a login flow");
+        if (authorization.method === "auto") {
+          return {
+            url: authorization.url,
+            instructions: authorization.instructions,
+            mode: "auto",
+            callback: completeOAuth(authorization.callback())
+          };
+        }
+        return {
+          url: authorization.url,
+          instructions: authorization.instructions,
+          mode: "code",
+          callback: async (code) => completeOAuth(authorization.callback(code))
+        };
+      },
+      refresh: async (credential) => {
+        const auth = {
+          type: "oauth",
+          refresh: credential.refresh,
+          access: credential.access,
+          expires: credential.expires
+        };
+        const refreshed = await refreshAccessToken(auth, client, ANTIGRAVITY_PROVIDER_ID);
+        if (!refreshed) throw new Error("Antigravity access-token refresh failed");
+        return {
+          ...credential,
+          refresh: refreshed.refresh,
+          access: refreshed.access ?? "",
+          expires: refreshed.expires ?? 0
+        };
+      },
+      label: (credential) => {
+        const email = credential.metadata?.email;
+        return typeof email === "string" && email ? email : void 0;
+      }
+    });
+  });
+}
+async function registerModels(ctx) {
+  const providerID = Provider2.ID.make(ANTIGRAVITY_PROVIDER_ID);
+  const models = Object.entries(OPENCODE_MODEL_DEFINITIONS).map(([id, definition]) => toV2Model(providerID, id, definition));
+  await ctx.provider.transform((editor) => {
+    const existing = editor.get(ANTIGRAVITY_PROVIDER_ID);
+    if (existing) {
+      const inventory = new Map(existing.models);
+      for (const model of models) inventory.set(model.id, model);
+      editor.models.set(ANTIGRAVITY_PROVIDER_ID, [...inventory.values()]);
+      return;
+    }
+    editor.add({
+      info: {
+        ...Provider2.Info.empty(providerID),
+        name: "Google",
+        activation: "enabled",
+        package: "@opencode/ai/providers/google"
+      },
+      models
+    });
+  });
+}
+async function createLegacyFetch(ctx, plugin, client) {
+  const loader = plugin.auth.loader;
+  const getAuth = async () => {
+    const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
+    if (connection) {
+      const credential = await ctx.integration.connection.resolve(connection);
+      if (credential?.type === "oauth" && credential.methodID === OAUTH_METHOD_ID2) {
+        return {
+          type: "oauth",
+          refresh: credential.refresh,
+          access: credential.access,
+          expires: credential.expires
+        };
+      }
+    }
+    const savedAccounts = await loadAccounts();
+    const account = savedAccounts?.accounts[savedAccounts.activeIndex] ?? savedAccounts?.accounts[0];
+    if (!account?.refreshToken) return { type: "none" };
+    return {
+      type: "oauth",
+      refresh: formatRefreshParts({
+        refreshToken: account.refreshToken,
+        projectId: account.projectId,
+        managedProjectId: account.managedProjectId
+      }),
+      access: "",
+      expires: 0
+    };
+  };
+  const auth = await getAuth();
+  if (!isOAuthAuth(auth)) {
+    throw new Error("Connect an Antigravity account in OpenCode before using an Antigravity model");
+  }
+  const provider = { models: {} };
+  const loaded = await loader(getAuth, provider);
+  if (!("fetch" in loaded) || typeof loaded.fetch !== "function") {
+    throw new Error("OpenCode did not provide an Antigravity request handler");
+  }
+  return loaded.fetch;
+}
+async function registerSearchTool(ctx, client) {
+  await ctx.tool.transform((editor) => {
+    editor.add({
+      name: "google_search",
+      description: "Search the web using Google Search and analyze URLs. If the user mentions URLs, include them in the urls parameter.",
+      input: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The search query or question" },
+          urls: { type: "array", items: { type: "string" }, description: "URLs to fetch and analyze" },
+          thinking: { type: "boolean", default: true, description: "Enable deeper analysis" }
+        },
+        required: ["query"],
+        additionalProperties: false
+      },
+      execute: async (input2, context) => {
+        const args = input2;
+        const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
+        const credential = connection ? await ctx.integration.connection.resolve(connection) : void 0;
+        if (!credential || credential.type !== "oauth" || credential.methodID !== OAUTH_METHOD_ID2) {
+          return { content: "Not connected to Antigravity. Use /connect and choose Google OAuth (Antigravity)." };
+        }
+        let auth = {
+          type: "oauth",
+          refresh: credential.refresh,
+          access: credential.access,
+          expires: credential.expires
+        };
+        if (!isOAuthAuth(auth)) {
+          return { content: "The active Google connection is not an Antigravity OAuth connection." };
+        }
+        if (!auth.access || accessTokenExpired(auth)) {
+          const refreshed = await refreshAccessToken(auth, client, ANTIGRAVITY_PROVIDER_ID);
+          if (!refreshed?.access) return { content: "Could not refresh the Antigravity access token." };
+          auth = refreshed;
+        }
+        const parts = parseRefreshParts(auth.refresh);
+        const projectID = parts.managedProjectId || parts.projectId || "unknown";
+        const result = await executeSearch(
+          {
+            query: args.query,
+            urls: args.urls,
+            thinking: args.thinking ?? true
+          },
+          auth.access ?? "",
+          projectID,
+          context.signal
+        );
+        return { content: result };
+      }
+    });
+  });
+}
+function createLegacyClient(ctx) {
+  const client = {
+    app: {
+      log: async ({ body }) => {
+        const message = `[${body.service ?? PLUGIN_ID}] ${body.message ?? ""}`;
+        if (body.level === "error") console.error(message, body.extra ?? "");
+        else if (body.level === "warn") console.warn(message, body.extra ?? "");
+        else console.info(message, body.extra ?? "");
+        return { data: void 0 };
+      }
+    },
+    tui: {
+      showToast: async ({ body }) => {
+        const title = body.title ? `${body.title}: ` : "";
+        if (body.variant === "error" || body.variant === "warning") console.warn(`[Antigravity Auth] ${title}${body.message}`);
+        else console.info(`[Antigravity Auth] ${title}${body.message}`);
+        return { data: void 0 };
+      }
+    },
+    auth: {
+      set: async () => void 0
+    },
+    session: {
+      abort: async ({ path: path5 }) => ctx.session.interrupt({ sessionID: path5.id, resume: false }),
+      messages: async ({ path: path5 }) => ({
+        data: await ctx.session.context({ sessionID: path5.id })
+      }),
+      prompt: async ({
+        path: path5,
+        body
+      }) => {
+        const text = (body.parts ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n");
+        if (!text) throw new Error("V2 sessions do not accept synthetic tool-result prompt parts");
+        return ctx.session.prompt({ sessionID: path5.id, text });
+      }
+    }
+  };
+  return client;
+}
+async function subscribeEvents(pluginContext, plugin, signal) {
+  try {
+    for await (const rawEvent of pluginContext.event.subscribe({ signal })) {
+      if (signal.aborted) return;
+      const event = asRecord(rawEvent);
+      const type = typeof event.type === "string" ? event.type : "unknown";
+      const properties = event.properties ?? event.data ?? event;
+      await plugin.event?.({ event: { type, properties } });
+    }
+  } catch (error) {
+    if (!signal.aborted) console.warn(`[Antigravity Auth] Event subscription stopped: ${String(error)}`);
+  }
+}
+function asRecord(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
 // index.ts
-var index_default = AntigravityCLIOAuthPlugin;
+var index_default = {
+  ...AntigravityV2Plugin,
+  server: AntigravityCLIOAuthPlugin
+};
 export {
   AntigravityCLIOAuthPlugin,
   GoogleOAuthPlugin,

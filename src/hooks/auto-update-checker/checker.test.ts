@@ -77,6 +77,17 @@ describe("isLocalDevMode / getLocalDevPath", () => {
     expect(result).toContain("opencode-antigravity-auth");
   });
 
+  it("recognizes local V2 plugin package entries", async () => {
+    const { getLocalDevPath } = await import("./checker");
+    fsMock.existsSync.mockImplementation((p: string) => p.endsWith("opencode.json"));
+    fsMock.readFileSync.mockReturnValue(
+      JSON.stringify({
+        plugins: [{ package: "file:///home/user/opencode-antigravity-auth/dist/index.js", options: {} }],
+      }),
+    );
+    expect(getLocalDevPath("/project")).toContain("opencode-antigravity-auth");
+  });
+
   it("returns null and does not throw when config file is malformed JSON", async () => {
     const { getLocalDevPath } = await import("./checker");
     fsMock.existsSync.mockReturnValue(true);
@@ -130,5 +141,49 @@ describe("findPluginEntry", () => {
     const result = findPluginEntry("/project");
     expect(result!.isPinned).toBe(false);
     expect(result!.pinnedVersion).toBeNull();
+  });
+
+  it("finds versioned package entries in the native V2 plugins array", async () => {
+    const { findPluginEntry } = await import("./checker");
+    fsMock.existsSync.mockImplementation((p: string) => p.endsWith("opencode.json"));
+    fsMock.readFileSync.mockReturnValue(
+      JSON.stringify({
+        plugins: [{ package: "opencode-antigravity-auth@1.5.0", options: { debug: true } }],
+      }),
+    );
+
+    expect(findPluginEntry("/project")).toMatchObject({
+      entry: "opencode-antigravity-auth@1.5.0",
+      isPinned: true,
+      pinnedVersion: "1.5.0",
+    });
+  });
+});
+
+describe("updatePinnedVersion", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it("updates the V2 package field and preserves plugin options", async () => {
+    const { updatePinnedVersion } = await import("./checker");
+    const source = `{
+      "plugins": [{ "package": "opencode-antigravity-auth@1.5.0", "options": { "debug": true } }],
+    }`;
+    fsMock.readFileSync.mockReturnValue(source);
+
+    const updated = updatePinnedVersion(
+      "/project/opencode.jsonc",
+      "opencode-antigravity-auth@1.5.0",
+      "1.6.0",
+    );
+
+    expect(updated).toBe(true);
+    expect(fsMock.writeFileSync).toHaveBeenCalledWith(
+      "/project/opencode.jsonc",
+      expect.stringContaining('"package": "opencode-antigravity-auth@1.6.0"'),
+      "utf-8",
+    );
+    expect(fsMock.writeFileSync.mock.calls[0]?.[1]).toContain('"debug": true');
   });
 });

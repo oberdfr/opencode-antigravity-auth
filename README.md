@@ -1,7 +1,7 @@
 # Antigravity + Gemini CLI OAuth Plugin for Opencode
 
 > **Fork:** [`halixm-dev/opencode-antigravity-auth`](https://github.com/halixm-dev/opencode-antigravity-auth)  
-> Adds **Gemini 3.6 / 3.7 / 3.8 Flash** (`gemini-3.X-flash-tiered` + `thinkingLevel`) on top of [NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth). Install with `"plugin": ["github:halixm-dev/opencode-antigravity-auth"]`.
+> Adds **Gemini 3.6 / 3.7 / 3.8 Flash** (`gemini-3.X-flash-tiered` + `thinkingLevel`) on top of [NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth). On OpenCode V2, install with `"plugins": ["github:halixm-dev/opencode-antigravity-auth"]`.
 
 [![npm version](https://img.shields.io/npm/v/opencode-antigravity-auth.svg)](https://www.npmjs.com/package/opencode-antigravity-auth)
 [![npm beta](https://img.shields.io/npm/v/opencode-antigravity-auth/beta.svg?label=beta)](https://www.npmjs.com/package/opencode-antigravity-auth)
@@ -49,36 +49,31 @@ Enable Opencode to authenticate against **Antigravity** (Google's IDE) via OAuth
 Paste this into any LLM agent (Claude Code, OpenCode, Cursor, etc.):
 
 ```
-Install the forked opencode-antigravity-auth plugin (halixm-dev fork — includes Gemini 3.6/3.7/3.8 Flash) and add the Antigravity model definitions to ~/.config/opencode/opencode.json by following: https://raw.githubusercontent.com/halixm-dev/opencode-antigravity-auth/main/README.md
+Install the forked opencode-antigravity-auth plugin (halixm-dev fork — includes Gemini 3.6/3.7/3.8 Flash) in OpenCode V2 using the `plugins` config key. The plugin registers its models automatically; follow https://raw.githubusercontent.com/halixm-dev/opencode-antigravity-auth/main/README.md
 ```
 
 **Option B: Manual setup**
 
 1. **Add the plugin** to `~/.config/opencode/opencode.json` (this fork ships a prebuilt `dist/`):
 
-   ```json
+   ```jsonc
    {
-     "plugin": ["github:halixm-dev/opencode-antigravity-auth"]
+     "$schema": "https://opencode.ai/config.json",
+     "plugins": ["github:halixm-dev/opencode-antigravity-auth"]
    }
    ```
 
    > Upstream npm package (no 3.6/3.7/3.8 Flash): `opencode-antigravity-auth@latest`.  
-   > Local checkout: `"plugin": ["file:/path/to/opencode-antigravity-auth"]` after `npm run build`.
+   > Local checkout: use `"plugins": [{ "package": "file:///path/to/opencode-antigravity-auth" }]` after `npm run build`.
 
-2. **Login** with your Google account:
+2. **Connect** your Google account in OpenCode:
 
-   ```bash
-   opencode auth login
-   ```
+   Run `/connect`, choose Google, then select the Antigravity OAuth method.
 
-3. **Add models** — choose one:
-   - Run `opencode auth login` → Google → OAuth with Google (Antigravity) → select **"Configure models in opencode.json"** (auto-configures all models)
-   - Or manually copy the [full configuration](#models) below
-
-4. **Use it:**
+3. **Use a model.** The plugin registers its models automatically; no provider/model configuration is required:
 
    ```bash
-   opencode run "Hello" --model=google/antigravity-gemini-3.8-flash --variant=high
+   opencode run "Hello" --model=google/antigravity-gemini-3.8-flash#high
    ```
 
 </details>
@@ -92,16 +87,16 @@ Install the forked opencode-antigravity-auth plugin (halixm-dev fork — include
    
    > **Note**: This path works on all platforms. On Windows, `~` resolves to your user home directory (e.g., `C:\Users\YourName`).
 
-2. Add the plugin to the `plugin` array
+2. Add `"github:halixm-dev/opencode-antigravity-auth"` to the V2 `plugins` array
 
-3. Add the model definitions from the [Full models configuration](#models) section
+3. Connect a Google account with `/connect` and choose the Antigravity OAuth method
 
-4. Set `provider` to `"google"` and choose a model
+4. Choose a model registered by the plugin; no manual model definitions are needed on V2
 
 ### Verification
 
 ```bash
-opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking --variant=max
+opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking#max
 ```
 
 </details>
@@ -143,15 +138,18 @@ opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking --varia
 > - Claude and image models always use Antigravity.
 > Model names are automatically transformed for the target API (e.g., `antigravity-gemini-3-flash` → `gemini-3-flash-preview` for CLI). Gemini 3.6/3.7/3.8 Flash are sent to Antigravity as `gemini-3.X-flash-tiered` with `thinkingLevel` in `generationConfig` (the bare `-medium`/`-high` ids return 404).
 
-**Using variants:**
+**Using variants on OpenCode V2:**
 ```bash
-opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking --variant=max
+opencode run "Hello" --model=google/antigravity-claude-opus-4-6-thinking#max
 ```
 
 For details on variant configuration and thinking levels, see [docs/MODEL-VARIANTS.md](docs/MODEL-VARIANTS.md).
 
 <details>
-<summary><b>Full models configuration (copy-paste ready)</b></summary>
+<summary><b>Legacy OpenCode 1.x manual model configuration</b></summary>
+
+OpenCode V2 registers models through the plugin API and does not need this block. Keep using the legacy `plugin` and
+`provider` syntax below only when running the V1 plugin entrypoint.
 
 Add this to your `~/.config/opencode/opencode.json`:
 
@@ -365,18 +363,8 @@ Permission 'cloudaicompanion.companions.generateChat' denied on resource
 
 ### Gemini Model Not Found
 
-Add this to your `google` provider config:
-
-```json
-{
-  "provider": {
-    "google": {
-      "npm": "@ai-sdk/google",
-      "models": { ... }
-    }
-  }
-}
-```
+On OpenCode V2, the plugin contributes its Google model definitions automatically. Check `opencode plugin list` and
+confirm that the Antigravity models appear in `/models`. For OpenCode 1.x, use the legacy model configuration above.
 
 ---
 
@@ -392,17 +380,17 @@ Invalid JSON payload received. Unknown name "parameters" at 'request.tools[0]'
 - MCP servers with malformed schemas
 - Plugin version regression
 
-**Solutions:**
+   **Solutions:**
 1. **Update to latest beta:**
    ```json
-   { "plugin": ["opencode-antigravity-auth@beta"] }
+   { "plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"] }
    ```
 
 2. **Disable MCP servers** one-by-one to find the problematic one
 
 3. **Add npm override:**
    ```json
-   { "provider": { "google": { "npm": "@ai-sdk/google" } } }
+   { "providers": { "google": { "package": "@opencode/ai/providers/google" } } }
    ```
 
 ---
@@ -548,24 +536,24 @@ ssh -L 51121:localhost:51121 user@remote
 
 ---
 
-### Configuration Key Typo: `plugin` not `plugins`
+### Plugin configuration key
 
-The correct key is `plugin` (singular):
+OpenCode V2 uses `plugins` (plural):
 
 ```json
 {
-  "plugin": ["opencode-antigravity-auth@beta"]
+  "plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"]
 }
 ```
 
-**Not** `"plugins"` (will cause "Unrecognized key" error).
+OpenCode V1 uses the legacy `plugin` key. The package retains a V1 entrypoint for older releases.
 
 ---
 
 ### Migrating Accounts Between Machines
 
 When copying `antigravity-accounts.json` to a new machine:
-1. Ensure the plugin is installed: `"plugin": ["opencode-antigravity-auth@beta"]`
+1. Ensure the plugin is installed: `"plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"]`
 2. Copy `~/.config/opencode/antigravity-accounts.json`
 3. If you get "API key missing" error, the refresh token may be invalid — re-authenticate
 
@@ -582,8 +570,8 @@ DCP creates synthetic assistant messages that lack thinking blocks. **List this 
 
 ```json
 {
-  "plugin": [
-    "opencode-antigravity-auth@latest",
+  "plugins": [
+    "github:halixm-dev/opencode-antigravity-auth",
     "@tarquinen/opencode-dcp@latest"
   ]
 }

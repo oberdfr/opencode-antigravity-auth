@@ -30,7 +30,7 @@ describe("updateOpencodeConfig", () => {
     }
   });
 
-  test("creates new config with default structure when file does not exist", async () => {
+  test("creates a native V2 config when the file does not exist", async () => {
     const result = await updateOpencodeConfig({ configPath });
 
     expect(result.success).toBe(true);
@@ -40,8 +40,18 @@ describe("updateOpencodeConfig", () => {
     // Verify written config has correct structure
     const writtenConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     expect(writtenConfig.$schema).toBe("https://opencode.ai/config.json");
+    expect(writtenConfig.plugins).toContain("opencode-antigravity-auth@latest");
+    expect(writtenConfig.provider).toBeUndefined();
+  });
+
+  test("can create a legacy V1 config for the V1 configuration menu", async () => {
+    const result = await updateOpencodeConfig({ configPath, format: "v1" });
+
+    expect(result.success).toBe(true);
+    const writtenConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     expect(writtenConfig.plugin).toContain("opencode-antigravity-auth@latest");
-    expect(writtenConfig.provider?.google?.models).toBeDefined();
+    expect(writtenConfig.provider.google.models["antigravity-gemini-3-pro"]).toBeDefined();
+    expect(writtenConfig.plugins).toBeUndefined();
   });
 
   test("replaces existing google models with plugin models", async () => {
@@ -198,6 +208,7 @@ describe("updateOpencodeConfig", () => {
   });
 
   test("includes all model definitions from OPENCODE_MODEL_DEFINITIONS", async () => {
+    fs.writeFileSync(configPath, JSON.stringify({ plugin: [], provider: {} }));
     const result = await updateOpencodeConfig({ configPath });
 
     expect(result.success).toBe(true);
@@ -302,5 +313,32 @@ describe("updateOpencodeConfig", () => {
     expect(writtenConfig.provider.google.customSetting).toBe(true);
     // But models should be replaced
     expect(writtenConfig.provider.google.models["old-model"]).toBeUndefined();
+  });
+
+  test("adds the plugin to native V2 plugins and leaves provider config untouched", async () => {
+    const existingConfig = {
+      plugins: [{ package: "opencode-antigravity-auth@latest", options: { debug: true } }, "another-plugin"],
+      providers: { google: { settings: { region: "us-central1" } } },
+    };
+    fs.writeFileSync(configPath, JSON.stringify(existingConfig));
+
+    const result = await updateOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(true);
+    const writtenConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    expect(writtenConfig.plugins).toEqual(existingConfig.plugins);
+    expect(writtenConfig.providers).toEqual(existingConfig.providers);
+    expect(writtenConfig.provider).toBeUndefined();
+  });
+
+  test("adds the plugin to an existing native V2 config without replacing other plugins", async () => {
+    fs.writeFileSync(configPath, JSON.stringify({ plugins: ["another-plugin"], providers: {} }));
+
+    const result = await updateOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(true);
+    const writtenConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    expect(writtenConfig.plugins).toEqual(["another-plugin", "opencode-antigravity-auth@latest"]);
+    expect(writtenConfig.providers).toEqual({});
   });
 });

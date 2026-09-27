@@ -13,12 +13,24 @@ function stripJsonComments(json) {
 }
 function getConfigPaths(directory) {
     return [
+        path.join(directory, "opencode.json"),
+        path.join(directory, "opencode.jsonc"),
         path.join(directory, ".opencode", "opencode.json"),
         path.join(directory, ".opencode", "opencode.jsonc"),
         path.join(directory, ".opencode.json"),
         USER_OPENCODE_CONFIG,
         USER_OPENCODE_CONFIG_JSONC,
     ];
+}
+function getPluginEntries(config) {
+    const entries = [];
+    for (const entry of [...(config.plugins ?? []), ...(config.plugin ?? [])]) {
+        if (typeof entry === "string")
+            entries.push(entry);
+        else if (entry && typeof entry.package === "string")
+            entries.push(entry.package);
+    }
+    return entries;
 }
 export function getLocalDevPath(directory) {
     for (const configPath of getConfigPaths(directory)) {
@@ -27,8 +39,7 @@ export function getLocalDevPath(directory) {
                 continue;
             const content = fs.readFileSync(configPath, "utf-8");
             const config = JSON.parse(stripJsonComments(content));
-            const plugins = config.plugin ?? [];
-            for (const entry of plugins) {
+            for (const entry of getPluginEntries(config)) {
                 if (entry.startsWith("file://") && entry.includes(PACKAGE_NAME)) {
                     try {
                         return fileURLToPath(entry);
@@ -96,8 +107,7 @@ export function findPluginEntry(directory) {
                 continue;
             const content = fs.readFileSync(configPath, "utf-8");
             const config = JSON.parse(stripJsonComments(content));
-            const plugins = config.plugin ?? [];
-            for (const entry of plugins) {
+            for (const entry of getPluginEntries(config)) {
                 if (entry === PACKAGE_NAME) {
                     return { entry, isPinned: false, pinnedVersion: null, configPath };
                 }
@@ -148,19 +158,67 @@ export function updatePinnedVersion(configPath, oldEntry, newVersion) {
     try {
         const content = fs.readFileSync(configPath, "utf-8");
         const newEntry = `${PACKAGE_NAME}@${newVersion}`;
-        const pluginMatch = content.match(/"plugin"\s*:\s*\[/);
+        const config = JSON.parse(stripJsonComments(content));
+        const pluginKey = ["plugins", "plugin"].find((key) => getPluginEntries({ [key]: config[key] }).includes(oldEntry));
+        if (!pluginKey) {
+            logAutoUpdate(`Entry "${oldEntry}" not found in a plugin list of ${configPath}`);
+            return false;
+        }
+        const escapedKey = pluginKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const pluginMatch = content.match(new RegExp(`"${escapedKey}"\\s*:\\s*\\[`));
         if (!pluginMatch || pluginMatch.index === undefined) {
-            logAutoUpdate(`No "plugin" array found in ${configPath}`);
+            logAutoUpdate(`No "${pluginKey}" array found in ${configPath}`);
             return false;
         }
         const startIdx = pluginMatch.index + pluginMatch[0].length;
         let bracketCount = 1;
         let endIdx = startIdx;
+        let quote;
+        let escaped = false;
+        let lineComment = false;
+        let blockComment = false;
         for (let i = startIdx; i < content.length && bracketCount > 0; i++) {
-            if (content[i] === "[")
+            const char = content[i];
+            const next = content[i + 1];
+            if (lineComment) {
+                if (char === "\n")
+                    lineComment = false;
+                endIdx = i;
+                continue;
+            }
+            if (blockComment) {
+                if (char === "*" && next === "/") {
+                    blockComment = false;
+                    i++;
+                }
+                endIdx = i;
+                continue;
+            }
+            if (quote) {
+                if (escaped)
+                    escaped = false;
+                else if (char === "\\")
+                    escaped = true;
+                else if (char === quote)
+                    quote = undefined;
+            }
+            else if (char === '"' || char === "'") {
+                quote = char;
+            }
+            else if (char === "/" && next === "/") {
+                lineComment = true;
+                i++;
+            }
+            else if (char === "/" && next === "*") {
+                blockComment = true;
+                i++;
+            }
+            else if (char === "[") {
                 bracketCount++;
-            else if (content[i] === "]")
+            }
+            else if (char === "]") {
                 bracketCount--;
+            }
             endIdx = i;
         }
         const before = content.slice(0, startIdx);
@@ -169,7 +227,7 @@ export function updatePinnedVersion(configPath, oldEntry, newVersion) {
         const escapedOldEntry = oldEntry.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         const regex = new RegExp(`["']${escapedOldEntry}["']`);
         if (!regex.test(pluginArrayContent)) {
-            logAutoUpdate(`Entry "${oldEntry}" not found in plugin array of ${configPath}`);
+            logAutoUpdate(`Entry "${oldEntry}" not found in "${pluginKey}" array of ${configPath}`);
             return false;
         }
         const updatedPluginArray = pluginArrayContent.replace(regex, `"${newEntry}"`);
