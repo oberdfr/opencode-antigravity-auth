@@ -45,6 +45,7 @@ describe("Antigravity V2 plugin setup", () => {
     const providerAdd = vi.fn();
     const modelSet = vi.fn();
     const toolAdd = vi.fn();
+    const rpcRegister = vi.fn(async () => ({ dispose: async () => undefined }));
     const sessionHook = vi.fn(async (..._args: unknown[]) => ({ dispose: async () => undefined }));
     const integrationTransform = async (callback: (editor: unknown) => void) => {
       callback({ method: { update: methodUpdate } });
@@ -66,6 +67,7 @@ describe("Antigravity V2 plugin setup", () => {
       location: { directory: "/project" },
       integration: { transform: integrationTransform, connection: { active: vi.fn(), resolve: vi.fn() } },
       provider: { transform: providerTransform },
+      rpc: { register: rpcRegister },
       session: { hook: sessionHook },
       tool: { transform: toolTransform },
       event: {
@@ -138,5 +140,13 @@ describe("Antigravity V2 plugin setup", () => {
     );
     expect(toolAdd).toHaveBeenCalledOnce();
     expect(toolAdd.mock.calls[0]?.[0]).toMatchObject({ name: "google_search" });
+
+    expect(rpcRegister).toHaveBeenCalledOnce();
+    const [rpcDefinition, rpcHandlers] = (rpcRegister.mock.calls[0] ?? []) as unknown as [
+      { id: string },
+      { quota: unknown },
+    ];
+    expect(rpcDefinition.id).toBe("antigravity");
+    expect(typeof rpcHandlers.quota).toBe("function");
   });
 });

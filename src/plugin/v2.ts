@@ -10,6 +10,7 @@ import { OPENCODE_MODEL_DEFINITIONS } from "./config/models";
 import type { PluginClient, PluginResult, OAuthAuthDetails, Provider as LegacyProvider } from "./types";
 import { startAntigravityProxy, type LegacyFetch } from "./v2-proxy";
 import { completeOAuth, toV2Model } from "./v2-adapters";
+import { AntigravityRpc, createAntigravityQuotaHandler } from "./rpc";
 
 const PLUGIN_ID = "opencode-antigravity-auth";
 const OAUTH_METHOD_ID = "antigravity";
@@ -26,6 +27,12 @@ export const AntigravityV2Plugin = Plugin.define({
 
     await registerOAuth(ctx, legacyPlugin, client);
     await registerModels(ctx);
+
+    // Read-only quota surface for other plugins (for example opencode-quota).
+    // Disposing happens automatically when the plugin unloads.
+    await ctx.rpc.register(AntigravityRpc, {
+      quota: createAntigravityQuotaHandler(client),
+    });
 
     let fetchPromise: Promise<LegacyFetch> | undefined;
     const proxy = await startAntigravityProxy(async () => {
