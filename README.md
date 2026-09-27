@@ -1,7 +1,7 @@
 # Antigravity + Gemini CLI OAuth Plugin for Opencode
 
-> **Fork:** [`halixm-dev/opencode-antigravity-auth`](https://github.com/halixm-dev/opencode-antigravity-auth)  
-> Adds **Gemini 3.6 / 3.7 / 3.8 Flash** (`gemini-3.X-flash-tiered` + `thinkingLevel`) on top of [NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth). On OpenCode V2, install with `"plugins": ["github:halixm-dev/opencode-antigravity-auth"]`.
+> **Fork:** [`oberdfr/opencode-antigravity-auth`](https://github.com/oberdfr/opencode-antigravity-auth)  
+> Adds **Gemini 3.6 / 3.7 / 3.8 Flash** (`gemini-3.X-flash-tiered` + `thinkingLevel`) on top of [NoeFabris/opencode-antigravity-auth](https://github.com/NoeFabris/opencode-antigravity-auth). On OpenCode V2, install with `"plugins": ["github:oberdfr/opencode-antigravity-auth"]`.
 
 [![npm version](https://img.shields.io/npm/v/opencode-antigravity-auth.svg)](https://www.npmjs.com/package/opencode-antigravity-auth)
 [![npm beta](https://img.shields.io/npm/v/opencode-antigravity-auth/beta.svg?label=beta)](https://www.npmjs.com/package/opencode-antigravity-auth)
@@ -49,7 +49,7 @@ Enable Opencode to authenticate against **Antigravity** (Google's IDE) via OAuth
 Paste this into any LLM agent (Claude Code, OpenCode, Cursor, etc.):
 
 ```
-Install the forked opencode-antigravity-auth plugin (halixm-dev fork — includes Gemini 3.6/3.7/3.8 Flash) in OpenCode V2 using the `plugins` config key. The plugin registers its models automatically; follow https://raw.githubusercontent.com/halixm-dev/opencode-antigravity-auth/main/README.md
+Install the forked opencode-antigravity-auth plugin (oberdfr fork — includes Gemini 3.6/3.7/3.8 Flash) in OpenCode V2 using the `plugins` config key. The plugin registers its models automatically; follow https://raw.githubusercontent.com/oberdfr/opencode-antigravity-auth/main/README.md
 ```
 
 **Option B: Manual setup**
@@ -59,7 +59,7 @@ Install the forked opencode-antigravity-auth plugin (halixm-dev fork — include
    ```jsonc
    {
      "$schema": "https://opencode.ai/config.json",
-     "plugins": ["github:halixm-dev/opencode-antigravity-auth"]
+     "plugins": ["github:oberdfr/opencode-antigravity-auth"]
    }
    ```
 
@@ -87,7 +87,7 @@ Install the forked opencode-antigravity-auth plugin (halixm-dev fork — include
    
    > **Note**: This path works on all platforms. On Windows, `~` resolves to your user home directory (e.g., `C:\Users\YourName`).
 
-2. Add `"github:halixm-dev/opencode-antigravity-auth"` to the V2 `plugins` array
+2. Add `"github:oberdfr/opencode-antigravity-auth"` to the V2 `plugins` array
 
 3. Connect a Google account with `/connect` and choose the Antigravity OAuth method
 
@@ -156,7 +156,7 @@ Add this to your `~/.config/opencode/opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["github:halixm-dev/opencode-antigravity-auth"],
+  "plugin": ["github:oberdfr/opencode-antigravity-auth"],
   "provider": {
     "google": {
       "models": {
@@ -383,7 +383,7 @@ Invalid JSON payload received. Unknown name "parameters" at 'request.tools[0]'
    **Solutions:**
 1. **Update to latest beta:**
    ```json
-   { "plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"] }
+   { "plugins": ["github:oberdfr/opencode-antigravity-auth"] }
    ```
 
 2. **Disable MCP servers** one-by-one to find the problematic one
@@ -542,7 +542,7 @@ OpenCode V2 uses `plugins` (plural):
 
 ```json
 {
-  "plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"]
+  "plugins": ["github:oberdfr/opencode-antigravity-auth"]
 }
 ```
 
@@ -553,7 +553,7 @@ OpenCode V1 uses the legacy `plugin` key. The package retains a V1 entrypoint fo
 ### Migrating Accounts Between Machines
 
 When copying `antigravity-accounts.json` to a new machine:
-1. Ensure the plugin is installed: `"plugins": ["github:halixm-dev/opencode-antigravity-auth#beta"]`
+1. Ensure the plugin is installed: `"plugins": ["github:oberdfr/opencode-antigravity-auth"]`
 2. Copy `~/.config/opencode/antigravity-accounts.json`
 3. If you get "API key missing" error, the refresh token may be invalid — re-authenticate
 
@@ -571,7 +571,7 @@ DCP creates synthetic assistant messages that lack thinking blocks. **List this 
 ```json
 {
   "plugins": [
-    "github:halixm-dev/opencode-antigravity-auth",
+    "github:oberdfr/opencode-antigravity-auth",
     "@tarquinen/opencode-dcp@latest"
   ]
 }
