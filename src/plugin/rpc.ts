@@ -10,7 +10,7 @@
 import { Rpc } from "@opencode/plugin/rpc";
 import { ANTIGRAVITY_PROVIDER_ID } from "../constants";
 import { checkAccountsQuota } from "./quota";
-import { loadAccounts } from "./storage";
+import { loadAccounts, saveAccounts } from "./storage";
 import type { AccountQuotaResult, QuotaGroup } from "./quota";
 import type { PluginClient } from "./types";
 
@@ -147,9 +147,16 @@ function toAccount(result: AccountQuotaResult): AntigravityQuotaOutput["accounts
 /**
  * Builds the `antigravity.quota` handler.
  *
- * The handler only reads: it loads the account pool and asks the existing quota
- * engine for a fresh reading. It deliberately does not persist quota caches or
- * rotated refresh tokens, so the quota consumer cannot change plugin behaviour.
+ * The handler reads the account pool and asks the existing quota engine for a
+ * fresh reading. It does not persist quota caches, so a consumer cannot change
+ * what the plugin reports.
+ *
+ * The one thing it does write back is the managed project id that project
+ * resolution just discovered. Resolving it costs several seconds, and it is
+ * derived from the account itself, so leaving it in memory meant every later
+ * read paid the same cost again. The CLI menu already persists exactly this
+ * field, so writing it here keeps the file consistent with that path rather
+ * than inventing a second one.
  */
 export function createAntigravityQuotaHandler(client: PluginClient) {
   return async function quota(): Promise<AntigravityQuotaOutput> {
@@ -161,6 +168,22 @@ export function createAntigravityQuotaHandler(client: PluginClient) {
     }
 
     const results = await checkAccountsQuota(accounts, client, ANTIGRAVITY_PROVIDER_ID);
+
+    if (storage) {
+      let changed = false;
+      for (const result of results) {
+        const updated = result.updatedAccount;
+        const current = storage.accounts[result.index];
+        if (!updated || !current) continue;
+        storage.accounts[result.index] = { ...current, ...updated };
+        changed = true;
+      }
+      if (changed) {
+        // Best effort: a failed write only costs the slower lookup next time.
+        await saveAccounts(storage).catch(() => {});
+      }
+    }
+
     return { available: true, accounts: results.map(toAccount) };
   };
 }

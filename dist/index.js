@@ -1954,9 +1954,69 @@ async function promptLoginMode(existingAccounts) {
 }
 
 // src/plugin/project.ts
+import { createHash } from "node:crypto";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { dirname as dirname3, join as join4 } from "node:path";
 var log3 = createLogger("project");
 var projectContextResultCache = /* @__PURE__ */ new Map();
 var projectContextPendingCache = /* @__PURE__ */ new Map();
+var LOAD_TIMEOUT_MS = 8e3;
+var PROJECT_CONTEXT_CACHE_FILE = "antigravity-project-context.json";
+var PROJECT_CONTEXT_TTL_MS = 24 * 60 * 60 * 1e3;
+function cacheFilePath() {
+  return join4(getConfigDir(), PROJECT_CONTEXT_CACHE_FILE);
+}
+function cacheKeyHash(refresh) {
+  return createHash("sha256").update(refresh).digest("hex");
+}
+function restoreFromCache(auth, cached) {
+  const parts = parseRefreshParts(auth.refresh);
+  if (cached.managedProjectId && parts.refreshToken) {
+    return {
+      auth: {
+        ...auth,
+        refresh: formatRefreshParts({
+          refreshToken: parts.refreshToken,
+          projectId: cached.projectId,
+          managedProjectId: cached.managedProjectId
+        })
+      },
+      effectiveProjectId: cached.effectiveProjectId
+    };
+  }
+  return { auth, effectiveProjectId: cached.effectiveProjectId };
+}
+async function readProjectContextCache() {
+  try {
+    const raw = await readFile(cacheFilePath(), "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+var cacheWriteQueue = Promise.resolve();
+function enqueueCacheWrite(task) {
+  const result = cacheWriteQueue.then(task, task);
+  cacheWriteQueue = result.catch(() => {
+  });
+  return result;
+}
+async function writeProjectContextCache(key, value) {
+  await enqueueCacheWrite(async () => {
+    try {
+      const cache = await readProjectContextCache();
+      cache[key] = value;
+      const path5 = cacheFilePath();
+      await mkdir(dirname3(path5), { recursive: true });
+      await writeFile(path5, `${JSON.stringify(cache, null, 2)}
+`, "utf8");
+    } catch (error) {
+      log3.debug("Failed to persist project context cache", { error: String(error) });
+    }
+  });
+}
 var CODE_ASSIST_METADATA = {
   ideType: "ANTIGRAVITY",
   platform: process.platform === "win32" ? "WINDOWS" : "MACOS",
@@ -2027,24 +2087,28 @@ async function loadManagedProject(accessToken, projectId) {
   const loadEndpoints = Array.from(
     /* @__PURE__ */ new Set([...ANTIGRAVITY_LOAD_ENDPOINTS, ...ANTIGRAVITY_ENDPOINT_FALLBACKS])
   );
-  for (const baseEndpoint of loadEndpoints) {
+  const attempts = loadEndpoints.map(async (baseEndpoint) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), LOAD_TIMEOUT_MS);
     try {
-      const response = await fetch(
-        `${baseEndpoint}/v1internal:loadCodeAssist`,
-        {
-          method: "POST",
-          headers: loadHeaders,
-          body: JSON.stringify(requestBody)
-        }
-      );
-      if (!response.ok) {
-        continue;
-      }
-      return await response.json();
+      const response = await fetch(`${baseEndpoint}/v1internal:loadCodeAssist`, {
+        method: "POST",
+        headers: loadHeaders,
+        body: JSON.stringify(requestBody),
+        signal: controller.signal
+      });
+      if (!response.ok) return { baseEndpoint, payload: null };
+      return { baseEndpoint, payload: await response.json() };
     } catch (error) {
       log3.debug("Failed to load managed project", { endpoint: baseEndpoint, error: String(error) });
-      continue;
+      return { baseEndpoint, payload: null };
+    } finally {
+      clearTimeout(timeout);
     }
+  });
+  const settled = await Promise.all(attempts);
+  for (const attempt of settled) {
+    if (attempt.payload) return attempt.payload;
   }
   return null;
 }
@@ -2104,6 +2168,12 @@ async function ensureProjectContext(auth) {
     if (pending) {
       return pending;
     }
+    const persisted = (await readProjectContextCache())[cacheKeyHash(cacheKey)];
+    if (persisted && Date.now() - persisted.cachedAt < PROJECT_CONTEXT_TTL_MS) {
+      const restored = restoreFromCache(auth, persisted);
+      projectContextResultCache.set(cacheKey, restored);
+      return restored;
+    }
   }
   const resolveContext = async () => {
     const parts = parseRefreshParts(auth.refresh);
@@ -2149,12 +2219,21 @@ async function ensureProjectContext(auth) {
   if (!cacheKey) {
     return resolveContext();
   }
-  const promise = resolveContext().then((result) => {
+  const promise = resolveContext().then(async (result) => {
     const nextKey = getCacheKey(result.auth) ?? cacheKey;
     projectContextPendingCache.delete(cacheKey);
     projectContextResultCache.set(nextKey, result);
     if (nextKey !== cacheKey) {
       projectContextResultCache.delete(cacheKey);
+    }
+    const parts = parseRefreshParts(result.auth.refresh);
+    for (const key of /* @__PURE__ */ new Set([cacheKey, nextKey])) {
+      await writeProjectContextCache(cacheKeyHash(key), {
+        cachedAt: Date.now(),
+        effectiveProjectId: result.effectiveProjectId,
+        ...parts.managedProjectId ? { managedProjectId: parts.managedProjectId } : {},
+        ...parts.projectId ? { projectId: parts.projectId } : {}
+      });
     }
     return result;
   }).catch((error) => {
@@ -2169,23 +2248,23 @@ async function ensureProjectContext(auth) {
 import crypto2 from "node:crypto";
 
 // src/plugin/cache.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 
 // src/plugin/cache/signature-cache.ts
 import { existsSync as existsSync3, mkdirSync as mkdirSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3, renameSync as renameSync2, unlinkSync as unlinkSync3 } from "node:fs";
-import { join as join4, dirname as dirname3 } from "node:path";
+import { join as join5, dirname as dirname4 } from "node:path";
 import { homedir as homedir4 } from "node:os";
 import { tmpdir } from "node:os";
 function getConfigDir3() {
   const platform = process.platform;
   if (platform === "win32") {
-    return join4(process.env.APPDATA || join4(homedir4(), "AppData", "Roaming"), "opencode");
+    return join5(process.env.APPDATA || join5(homedir4(), "AppData", "Roaming"), "opencode");
   }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join4(homedir4(), ".config");
-  return join4(xdgConfig, "opencode");
+  const xdgConfig = process.env.XDG_CONFIG_HOME || join5(homedir4(), ".config");
+  return join5(xdgConfig, "opencode");
 }
 function getCacheFilePath() {
-  return join4(getConfigDir3(), "antigravity-signature-cache.json");
+  return join5(getConfigDir3(), "antigravity-signature-cache.json");
 }
 var SignatureCache = class {
   // In-memory cache: key -> entry with signature and optional thinking text
@@ -2390,7 +2469,7 @@ var SignatureCache = class {
    */
   saveToDisk() {
     try {
-      const dir = dirname3(this.cacheFilePath);
+      const dir = dirname4(this.cacheFilePath);
       if (!existsSync3(dir)) {
         mkdirSync4(dir, { recursive: true });
       }
@@ -2432,7 +2511,7 @@ var SignatureCache = class {
           last_write: now
         }
       };
-      const tmpPath = join4(tmpdir(), `antigravity-cache-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
+      const tmpPath = join5(tmpdir(), `antigravity-cache-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`);
       writeFileSync3(tmpPath, JSON.stringify(cacheData, null, 2), "utf-8");
       try {
         renameSync2(tmpPath, this.cacheFilePath);
@@ -2521,7 +2600,7 @@ function initDiskSignatureCache(config) {
   return diskCache;
 }
 function hashText(text) {
-  return createHash("sha256").update(text, "utf8").digest("hex").slice(0, SIGNATURE_TEXT_HASH_HEX_LEN);
+  return createHash2("sha256").update(text, "utf8").digest("hex").slice(0, SIGNATURE_TEXT_HASH_HEX_LEN);
 }
 function makeDiskKey(sessionId, textHash) {
   return `${sessionId}:${textHash}`;
@@ -2986,21 +3065,21 @@ var DEFAULT_CONFIG = {
 
 // src/plugin/config/loader.ts
 import { existsSync as existsSync4, readFileSync as readFileSync4 } from "node:fs";
-import { join as join5 } from "node:path";
+import { join as join6 } from "node:path";
 import { homedir as homedir5 } from "node:os";
 var log4 = createLogger("config");
 function getConfigDir4() {
   if (process.env.OPENCODE_CONFIG_DIR) {
     return process.env.OPENCODE_CONFIG_DIR;
   }
-  const xdgConfig = process.env.XDG_CONFIG_HOME || join5(homedir5(), ".config");
-  return join5(xdgConfig, "opencode");
+  const xdgConfig = process.env.XDG_CONFIG_HOME || join6(homedir5(), ".config");
+  return join6(xdgConfig, "opencode");
 }
 function getUserConfigPath() {
-  return join5(getConfigDir4(), "antigravity.json");
+  return join6(getConfigDir4(), "antigravity.json");
 }
 function getProjectConfigPath(directory) {
-  return join5(directory, ".opencode", "antigravity.json");
+  return join6(directory, ".opencode", "antigravity.json");
 }
 function loadConfigFile(path5) {
   try {
@@ -5858,33 +5937,33 @@ function resolveModelForHeaderStyle(requestedModel, headerStyle) {
 
 // src/plugin/recovery/storage.ts
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, readdirSync as readdirSync2, readFileSync as readFileSync5, unlinkSync as unlinkSync4, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join8 } from "node:path";
+import { join as join9 } from "node:path";
 
 // src/plugin/recovery/constants.ts
-import { join as join7 } from "node:path";
+import { join as join8 } from "node:path";
 import { homedir as homedir7 } from "node:os";
 function getXdgData() {
   const platform = process.platform;
   if (platform === "win32") {
-    return process.env.APPDATA || join7(homedir7(), "AppData", "Roaming");
+    return process.env.APPDATA || join8(homedir7(), "AppData", "Roaming");
   }
-  return process.env.XDG_DATA_HOME || join7(homedir7(), ".local", "share");
+  return process.env.XDG_DATA_HOME || join8(homedir7(), ".local", "share");
 }
-var OPENCODE_STORAGE = join7(getXdgData(), "opencode", "storage");
-var MESSAGE_STORAGE = join7(OPENCODE_STORAGE, "message");
-var PART_STORAGE = join7(OPENCODE_STORAGE, "part");
+var OPENCODE_STORAGE = join8(getXdgData(), "opencode", "storage");
+var MESSAGE_STORAGE = join8(OPENCODE_STORAGE, "message");
+var PART_STORAGE = join8(OPENCODE_STORAGE, "part");
 var THINKING_TYPES = /* @__PURE__ */ new Set(["thinking", "redacted_thinking", "reasoning"]);
 
 // src/plugin/recovery/storage.ts
 function getMessageDir(sessionID) {
   if (!existsSync6(MESSAGE_STORAGE)) return "";
-  const directPath = join8(MESSAGE_STORAGE, sessionID);
+  const directPath = join9(MESSAGE_STORAGE, sessionID);
   if (existsSync6(directPath)) {
     return directPath;
   }
   try {
     for (const dir of readdirSync2(MESSAGE_STORAGE)) {
-      const sessionPath = join8(MESSAGE_STORAGE, dir, sessionID);
+      const sessionPath = join9(MESSAGE_STORAGE, dir, sessionID);
       if (existsSync6(sessionPath)) {
         return sessionPath;
       }
@@ -5901,7 +5980,7 @@ function readMessages(sessionID) {
     for (const file of readdirSync2(messageDir)) {
       if (!file.endsWith(".json")) continue;
       try {
-        const content = readFileSync5(join8(messageDir, file), "utf-8");
+        const content = readFileSync5(join9(messageDir, file), "utf-8");
         messages.push(JSON.parse(content));
       } catch {
         continue;
@@ -5918,14 +5997,14 @@ function readMessages(sessionID) {
   });
 }
 function readParts(messageID) {
-  const partDir = join8(PART_STORAGE, messageID);
+  const partDir = join9(PART_STORAGE, messageID);
   if (!existsSync6(partDir)) return [];
   const parts = [];
   try {
     for (const file of readdirSync2(partDir)) {
       if (!file.endsWith(".json")) continue;
       try {
-        const content = readFileSync5(join8(partDir, file), "utf-8");
+        const content = readFileSync5(join9(partDir, file), "utf-8");
         parts.push(JSON.parse(content));
       } catch {
         continue;
@@ -5968,7 +6047,7 @@ function findMessagesWithOrphanThinking(sessionID) {
   return result;
 }
 function prependThinkingPart(sessionID, messageID) {
-  const partDir = join8(PART_STORAGE, messageID);
+  const partDir = join9(PART_STORAGE, messageID);
   try {
     if (!existsSync6(partDir)) {
       mkdirSync6(partDir, { recursive: true });
@@ -5982,21 +6061,21 @@ function prependThinkingPart(sessionID, messageID) {
       thinking: "",
       synthetic: true
     };
-    writeFileSync5(join8(partDir, `${partId}.json`), JSON.stringify(part, null, 2));
+    writeFileSync5(join9(partDir, `${partId}.json`), JSON.stringify(part, null, 2));
     return true;
   } catch {
     return false;
   }
 }
 function stripThinkingParts(messageID) {
-  const partDir = join8(PART_STORAGE, messageID);
+  const partDir = join9(PART_STORAGE, messageID);
   if (!existsSync6(partDir)) return false;
   let anyRemoved = false;
   try {
     for (const file of readdirSync2(partDir)) {
       if (!file.endsWith(".json")) continue;
       try {
-        const filePath = join8(partDir, file);
+        const filePath = join9(partDir, file);
         const content = readFileSync5(filePath, "utf-8");
         const part = JSON.parse(content);
         if (THINKING_TYPES.has(part.type)) {
@@ -9751,10 +9830,33 @@ function applyAccountUpdates(account, auth) {
   const changed = updated.refreshToken !== account.refreshToken || updated.projectId !== account.projectId || updated.managedProjectId !== account.managedProjectId;
   return changed ? updated : void 0;
 }
+var QUOTA_CONCURRENCY = 4;
+async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const runner = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await worker(items[index], index);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, () => runner())
+  );
+  return results;
+}
 async function checkAccountsQuota(accounts, client, providerId = ANTIGRAVITY_PROVIDER_ID) {
-  const results = [];
   logQuotaFetch("start", accounts.length);
-  for (const [index, account] of accounts.entries()) {
+  const results = await mapWithConcurrency(
+    accounts,
+    QUOTA_CONCURRENCY,
+    async (account, index) => checkAccountQuota(account, index, client, providerId)
+  );
+  logQuotaFetch("complete", accounts.length, `ok=${results.filter((r) => r.status === "ok").length} errors=${results.filter((r) => r.status === "error").length}`);
+  return results;
+}
+async function checkAccountQuota(account, index, client, providerId) {
+  {
     const disabled = account.enabled === false;
     let auth = buildAuthFromAccount(account);
     try {
@@ -9787,7 +9889,11 @@ async function checkAccountsQuota(accounts, client, providerId = ANTIGRAVITY_PRO
       if (geminiCliResponse.buckets === void 0 || geminiCliResponse.buckets.length === 0) {
         geminiCliQuotaResult.error = geminiCliQuotaResult.models.length === 0 ? "No Gemini CLI quota available" : void 0;
       }
-      results.push({
+      for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
+        const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
+        logQuotaStatus(account.email, index, remainingPercent, family);
+      }
+      return {
         index,
         email: account.email,
         status: "ok",
@@ -9795,24 +9901,18 @@ async function checkAccountsQuota(accounts, client, providerId = ANTIGRAVITY_PRO
         quota: quotaResult,
         geminiCliQuota: geminiCliQuotaResult,
         updatedAccount
-      });
-      for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
-        const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
-        logQuotaStatus(account.email, index, remainingPercent, family);
-      }
+      };
     } catch (error) {
-      results.push({
+      logQuotaFetch("error", void 0, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
+      return {
         index,
         email: account.email,
         status: "error",
         disabled,
         error: error instanceof Error ? error.message : String(error)
-      });
-      logQuotaFetch("error", void 0, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
+      };
     }
   }
-  logQuotaFetch("complete", accounts.length, `ok=${results.filter((r) => r.status === "ok").length} errors=${results.filter((r) => r.status === "error").length}`);
-  return results;
 }
 
 // src/plugin/refresh-queue.ts
@@ -13036,6 +13136,133 @@ function toV2Model(providerID, id, definition) {
   };
 }
 
+// src/plugin/rpc.ts
+import { Rpc } from "@opencode/plugin/rpc";
+var GROUP_LABELS = {
+  claude: "Claude",
+  "gemini-pro": "Gemini Pro",
+  "gemini-flash": "Gemini Flash"
+};
+var quotaGroupSchema = {
+  type: "object",
+  properties: {
+    id: { type: "string" },
+    label: { type: "string" },
+    remainingPercent: { type: "number" },
+    resetTime: { type: "string" },
+    modelCount: { type: "number" }
+  },
+  required: ["id", "label", "remainingPercent", "modelCount"],
+  additionalProperties: false
+};
+var geminiCliModelSchema = {
+  type: "object",
+  properties: {
+    modelId: { type: "string" },
+    remainingPercent: { type: "number" },
+    resetTime: { type: "string" }
+  },
+  required: ["modelId", "remainingPercent"],
+  additionalProperties: false
+};
+var accountSchema = {
+  type: "object",
+  properties: {
+    index: { type: "number" },
+    email: { type: "string" },
+    status: { type: "string", enum: ["ok", "disabled", "error"] },
+    error: { type: "string" },
+    enabled: { type: "boolean" },
+    groups: { type: "array", items: quotaGroupSchema },
+    geminiCli: { type: "array", items: geminiCliModelSchema },
+    geminiCliError: { type: "string" }
+  },
+  required: ["index", "status", "enabled", "groups", "geminiCli"],
+  additionalProperties: false
+};
+var AntigravityRpc = Rpc.define({
+  id: "antigravity",
+  methods: {
+    quota: {
+      input: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      output: {
+        type: "object",
+        properties: {
+          available: { type: "boolean" },
+          reason: { type: "string" },
+          accounts: { type: "array", items: accountSchema }
+        },
+        required: ["available", "accounts"],
+        additionalProperties: false
+      }
+    }
+  },
+  events: {}
+});
+function toPercent(fraction) {
+  if (typeof fraction !== "number" || !Number.isFinite(fraction)) return 0;
+  return Math.round(Math.min(Math.max(fraction, 0), 1) * 1e3) / 10;
+}
+function toAccount(result) {
+  const rawGroups = result.quota?.groups ?? {};
+  const groups = [];
+  for (const id of Object.keys(rawGroups)) {
+    const summary = rawGroups[id];
+    if (!summary) continue;
+    groups.push({
+      id,
+      label: GROUP_LABELS[id] ?? id,
+      remainingPercent: toPercent(summary.remainingFraction),
+      ...summary.resetTime ? { resetTime: summary.resetTime } : {},
+      modelCount: summary.modelCount
+    });
+  }
+  const geminiCli = (result.geminiCliQuota?.models ?? []).map((model) => ({
+    modelId: model.modelId,
+    remainingPercent: toPercent(model.remainingFraction),
+    ...model.resetTime ? { resetTime: model.resetTime } : {}
+  }));
+  return {
+    index: result.index,
+    ...result.email ? { email: result.email } : {},
+    status: result.status,
+    ...result.error ? { error: result.error } : {},
+    enabled: result.disabled !== true,
+    groups,
+    geminiCli,
+    ...result.geminiCliQuota?.error ? { geminiCliError: result.geminiCliQuota.error } : {}
+  };
+}
+function createAntigravityQuotaHandler(client) {
+  return async function quota() {
+    const storage = await loadAccounts();
+    const accounts = storage?.accounts ?? [];
+    if (accounts.length === 0) {
+      return { available: false, reason: "No Antigravity accounts connected", accounts: [] };
+    }
+    const results = await checkAccountsQuota(accounts, client, ANTIGRAVITY_PROVIDER_ID);
+    if (storage) {
+      let changed = false;
+      for (const result of results) {
+        const updated = result.updatedAccount;
+        const current = storage.accounts[result.index];
+        if (!updated || !current) continue;
+        storage.accounts[result.index] = { ...current, ...updated };
+        changed = true;
+      }
+      if (changed) {
+        await saveAccounts(storage).catch(() => {
+        });
+      }
+    }
+    return { available: true, accounts: results.map(toAccount) };
+  };
+}
+
 // src/plugin/v2.ts
 var PLUGIN_ID = "opencode-antigravity-auth";
 var OAUTH_METHOD_ID2 = "antigravity";
@@ -13050,6 +13277,9 @@ var AntigravityV2Plugin = Plugin.define({
     });
     await registerOAuth(ctx, legacyPlugin, client);
     await registerModels(ctx);
+    await ctx.rpc.register(AntigravityRpc, {
+      quota: createAntigravityQuotaHandler(client)
+    });
     let fetchPromise;
     const proxy = await startAntigravityProxy(async () => {
       fetchPromise ??= createLegacyFetch(ctx, legacyPlugin, client);

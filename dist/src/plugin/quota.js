@@ -198,10 +198,36 @@ function applyAccountUpdates(account, auth) {
         updated.managedProjectId !== account.managedProjectId;
     return changed ? updated : undefined;
 }
+/**
+ * How many accounts to check at once.
+ *
+ * Each account needs a token refresh, a project-context lookup and two quota
+ * round trips, and the accounts are independent, so running them one after
+ * another made the wait grow with the number of accounts. The cap keeps a large
+ * account pool from opening a burst of simultaneous requests at Google.
+ */
+const QUOTA_CONCURRENCY = 4;
+/** Runs `worker` over `items` with a bounded number of calls in flight. */
+async function mapWithConcurrency(items, limit, worker) {
+    const results = new Array(items.length);
+    let next = 0;
+    const runner = async () => {
+        while (next < items.length) {
+            const index = next++;
+            results[index] = await worker(items[index], index);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runner()));
+    return results;
+}
 export async function checkAccountsQuota(accounts, client, providerId = ANTIGRAVITY_PROVIDER_ID) {
-    const results = [];
     logQuotaFetch("start", accounts.length);
-    for (const [index, account] of accounts.entries()) {
+    const results = await mapWithConcurrency(accounts, QUOTA_CONCURRENCY, async (account, index) => checkAccountQuota(account, index, client, providerId));
+    logQuotaFetch("complete", accounts.length, `ok=${results.filter(r => r.status === "ok").length} errors=${results.filter(r => r.status === "error").length}`);
+    return results;
+}
+async function checkAccountQuota(account, index, client, providerId) {
+    {
         const disabled = account.enabled === false;
         let auth = buildAuthFromAccount(account);
         try {
@@ -241,7 +267,12 @@ export async function checkAccountsQuota(accounts, client, providerId = ANTIGRAV
                     ? "No Gemini CLI quota available"
                     : undefined;
             }
-            results.push({
+            // Log quota status for each family
+            for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
+                const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
+                logQuotaStatus(account.email, index, remainingPercent, family);
+            }
+            return {
                 index,
                 email: account.email,
                 status: "ok",
@@ -249,25 +280,18 @@ export async function checkAccountsQuota(accounts, client, providerId = ANTIGRAV
                 quota: quotaResult,
                 geminiCliQuota: geminiCliQuotaResult,
                 updatedAccount,
-            });
-            // Log quota status for each family
-            for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
-                const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
-                logQuotaStatus(account.email, index, remainingPercent, family);
-            }
+            };
         }
         catch (error) {
-            results.push({
+            logQuotaFetch("error", undefined, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
+            return {
                 index,
                 email: account.email,
                 status: "error",
                 disabled,
                 error: error instanceof Error ? error.message : String(error),
-            });
-            logQuotaFetch("error", undefined, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
+            };
         }
     }
-    logQuotaFetch("complete", accounts.length, `ok=${results.filter(r => r.status === "ok").length} errors=${results.filter(r => r.status === "error").length}`);
-    return results;
 }
 //# sourceMappingURL=quota.js.map
