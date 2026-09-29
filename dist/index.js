@@ -1986,10 +1986,19 @@ function restoreFromCache(auth, cached) {
       effectiveProjectId: cached.effectiveProjectId,
       // Carried back, or a warmed account would come back with its project but
       // no plan, which reads as an account that is not a subscription.
-      ...plan ? { subscription: plan } : {}
+      ...plan ? { subscription: plan } : {},
+      // Likewise for the consumer project: without it the weekly allowance is not
+      // read at all, so a warm read would report the five-hour window alone and
+      // a subscription account would look like it only has that one.
+      ...cached.consumerProjectId ? { consumerProjectId: cached.consumerProjectId } : {}
     };
   }
-  return { auth, effectiveProjectId: cached.effectiveProjectId, ...plan ? { subscription: plan } : {} };
+  return {
+    auth,
+    effectiveProjectId: cached.effectiveProjectId,
+    ...plan ? { subscription: plan } : {},
+    ...cached.consumerProjectId ? { consumerProjectId: cached.consumerProjectId } : {}
+  };
 }
 async function readProjectContextCache() {
   try {
@@ -2033,11 +2042,26 @@ var CODE_ASSIST_METADATA = {
 function buildMetadata() {
   return { ideType: LOAD_CODE_ASSIST_METADATA.ideType };
 }
+function readConsumerProjectId(payload) {
+  return extractManagedProjectId(payload);
+}
 function readPaidTier(payload) {
   const id = payload?.paidTier?.id;
   if (!id) return void 0;
   const name = payload?.paidTier?.name;
   return { id, ...name ? { name } : {} };
+}
+function extractManagedProjectId(payload) {
+  if (!payload) {
+    return void 0;
+  }
+  if (typeof payload.cloudaicompanionProject === "string") {
+    return payload.cloudaicompanionProject;
+  }
+  if (payload.cloudaicompanionProject && typeof payload.cloudaicompanionProject.id === "string") {
+    return payload.cloudaicompanionProject.id;
+  }
+  return void 0;
 }
 function getCacheKey(auth) {
   const refresh = auth.refresh?.trim();
@@ -2129,18 +2153,26 @@ async function ensureProjectContext(auth) {
       if (remembered?.subscription) return { ...known, subscription: remembered.subscription };
       const payload = await loadManagedProject(accessToken, parts.projectId ?? parts.managedProjectId);
       const subscription2 = readPaidTier(payload);
-      if (!subscription2) return known;
+      const consumerProjectId2 = readConsumerProjectId(payload);
+      if (!subscription2 && !consumerProjectId2) return known;
       await writeProjectContextCache(cacheKeyHash(stableKey ?? auth.refresh.trim()), {
         cachedAt: Date.now(),
         effectiveProjectId: parts.managedProjectId,
-        subscription: subscription2
+        subscription: subscription2,
+        consumerProjectId: consumerProjectId2
       });
-      return { ...known, subscription: subscription2 };
+      return { ...known, subscription: subscription2, consumerProjectId: consumerProjectId2 };
     }
     const fallbackProjectId = parts.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID;
     const loadPayload = await loadManagedProject(accessToken, fallbackProjectId);
     const subscription = readPaidTier(loadPayload);
-    return subscription ? { auth, effectiveProjectId: fallbackProjectId, subscription } : { auth, effectiveProjectId: fallbackProjectId };
+    const consumerProjectId = readConsumerProjectId(loadPayload);
+    return {
+      auth,
+      effectiveProjectId: fallbackProjectId,
+      ...subscription ? { subscription } : {},
+      ...consumerProjectId ? { consumerProjectId } : {}
+    };
   };
   if (!cacheKey) {
     return resolveContext();
@@ -2152,13 +2184,17 @@ async function ensureProjectContext(auth) {
     if (nextKey !== cacheKey) {
       projectContextResultCache.delete(cacheKey);
     }
-    if (!result.subscription) return result;
+    if (!result.subscription && !result.consumerProjectId) return result;
     const parts = parseRefreshParts(result.auth.refresh);
     for (const key of /* @__PURE__ */ new Set([cacheKey, nextKey])) {
       await writeProjectContextCache(cacheKeyHash(key), {
         cachedAt: Date.now(),
         effectiveProjectId: result.effectiveProjectId,
         ...result.subscription ? { subscription: result.subscription } : {},
+        // The weekly allowance is only served on the autopush host when asked
+        // with this project, so a warm read that has forgotten it reports the
+        // five-hour window alone and looks like the account has just the one.
+        ...result.consumerProjectId ? { consumerProjectId: result.consumerProjectId } : {},
         ...parts.managedProjectId ? { managedProjectId: parts.managedProjectId } : {},
         ...parts.projectId ? { projectId: parts.projectId } : {}
       });
@@ -8383,6 +8419,16 @@ function resolveQuotaGroup(family, model) {
   }
   return family === "claude" ? "claude" : "gemini-pro";
 }
+function tightestWindow(summary) {
+  let tightest;
+  for (const window of summary?.windows ?? []) {
+    if (window.remainingFraction === void 0) continue;
+    if (tightest === void 0 || tightest.remainingFraction !== void 0 && window.remainingFraction < tightest.remainingFraction) {
+      tightest = window;
+    }
+  }
+  return tightest;
+}
 function isOverSoftQuotaThreshold(account, family, thresholdPercent, cacheTtlMs, model) {
   if (thresholdPercent >= 100) return false;
   if (!account.cachedQuota) return false;
@@ -8391,13 +8437,14 @@ function isOverSoftQuotaThreshold(account, family, thresholdPercent, cacheTtlMs,
   if (age > cacheTtlMs) return false;
   const quotaGroup = resolveQuotaGroup(family, model);
   const groupData = account.cachedQuota[quotaGroup];
-  if (groupData?.remainingFraction == null) return false;
-  const remainingFraction = Math.max(0, Math.min(1, groupData.remainingFraction));
+  const tightest = tightestWindow(groupData);
+  if (tightest?.remainingFraction == null) return false;
+  const remainingFraction = Math.max(0, Math.min(1, tightest.remainingFraction));
   const usedPercent = (1 - remainingFraction) * 100;
   const isOverThreshold = usedPercent >= thresholdPercent;
   if (isOverThreshold) {
     const accountLabel = formatAccountLabel(account.email, account.index);
-    const resetSuffix = groupData.resetTime ? ` (resets: ${groupData.resetTime})` : "";
+    const resetSuffix = tightest.resetTime ? ` (resets: ${tightest.resetTime})` : "";
     const message = `[SoftQuota] Skipping ${accountLabel}: ${quotaGroup} usage ${usedPercent.toFixed(1)}% >= threshold ${thresholdPercent}%${resetSuffix}`;
     debugLogToFile(message);
   }
@@ -9123,8 +9170,9 @@ var AccountManager = class _AccountManager {
     const waitTimes = [];
     for (const acc of enabled) {
       const groupData = acc.cachedQuota?.[quotaGroup];
-      if (groupData?.resetTime) {
-        const resetTimestamp = Date.parse(groupData.resetTime);
+      for (const window of groupData?.windows ?? []) {
+        if (!window.resetTime) continue;
+        const resetTimestamp = Date.parse(window.resetTime);
         if (Number.isFinite(resetTimestamp)) {
           waitTimes.push(Math.max(0, resetTimestamp - now));
         }
@@ -9606,14 +9654,6 @@ function normalizeRemainingFraction(value) {
   if (value > 1) return 1;
   return value;
 }
-function parseResetTime(resetTime) {
-  if (!resetTime) return null;
-  const timestamp = Date.parse(resetTime);
-  if (!Number.isFinite(timestamp)) {
-    return null;
-  }
-  return timestamp;
-}
 function classifyQuotaGroup(modelName, displayName) {
   const combined = `${modelName} ${displayName ?? ""}`.toLowerCase();
   if (combined.includes("claude")) {
@@ -9627,42 +9667,19 @@ function classifyQuotaGroup(modelName, displayName) {
   return family === "gemini-flash" ? "gemini-flash" : "gemini-pro";
 }
 function aggregateQuota(models) {
-  const groups = {};
-  if (!models) {
-    return { groups, modelCount: 0 };
-  }
-  let totalCount = 0;
-  for (const [modelName, entry] of Object.entries(models)) {
-    const group = classifyQuotaGroup(modelName, entry.displayName ?? entry.modelName);
-    if (!group) {
+  const buckets = [];
+  for (const [modelName, entry] of Object.entries(models ?? {})) {
+    if (!classifyQuotaGroup(modelName, entry.displayName ?? entry.modelName)) {
       continue;
     }
     const quotaInfo = entry.quotaInfo;
-    const remainingFraction = quotaInfo ? normalizeRemainingFraction(quotaInfo.remainingFraction) : void 0;
-    const resetTime = quotaInfo?.resetTime;
-    const resetTimestamp = parseResetTime(resetTime);
-    totalCount += 1;
-    const existing = groups[group];
-    const nextCount = (existing?.modelCount ?? 0) + 1;
-    const nextRemaining = remainingFraction === void 0 ? existing?.remainingFraction : existing?.remainingFraction === void 0 ? remainingFraction : Math.min(existing.remainingFraction, remainingFraction);
-    let nextResetTime = existing?.resetTime;
-    if (resetTimestamp !== null) {
-      if (!existing?.resetTime) {
-        nextResetTime = resetTime;
-      } else {
-        const existingTimestamp = parseResetTime(existing.resetTime);
-        if (existingTimestamp === null || resetTimestamp < existingTimestamp) {
-          nextResetTime = resetTime;
-        }
-      }
-    }
-    groups[group] = {
-      remainingFraction: nextRemaining,
-      resetTime: nextResetTime,
-      modelCount: nextCount
-    };
+    buckets.push({
+      modelId: modelName,
+      ...quotaInfo?.remainingFraction !== void 0 ? { remainingFraction: quotaInfo.remainingFraction } : {},
+      ...quotaInfo?.resetTime ? { resetTime: quotaInfo.resetTime } : {}
+    });
   }
-  return { groups, modelCount: totalCount };
+  return aggregateBuckets({ buckets });
 }
 async function fetchWithTimeout2(url, options, timeoutMs = FETCH_TIMEOUT_MS2) {
   const controller = new AbortController();
@@ -9697,62 +9714,90 @@ async function fetchAvailableModels(accessToken, projectId) {
   );
   throw new Error(errors.join("; ") || "fetchAvailableModels failed");
 }
-async function fetchGeminiCliQuota(accessToken, projectId) {
-  const endpoint = ANTIGRAVITY_ENDPOINT_PROD;
-  const platform = process.platform || "darwin";
-  const arch = process.arch || "arm64";
-  const geminiCliUserAgent = `GeminiCLI/1.0.0/gemini-2.5-pro (${platform}; ${arch})`;
-  const body = projectId ? { project: projectId } : {};
-  const ask = async (userAgent, headers) => {
-    const response = await fetchWithTimeout2(`${endpoint}/v1internal:retrieveUserQuota`, {
+async function fetchQuotaBuckets(accessToken, projectId, consumerProjectId) {
+  const antigravityHeaders = getAntigravityHeaders();
+  const headers = {
+    Authorization: `Bearer ${accessToken}`,
+    "Content-Type": "application/json",
+    // Asked as Antigravity. Asked as the Gemini CLI this same call answers 403
+    // SUBSCRIPTION_REQUIRED, which reads like the account has no quota at all, so
+    // the whole bucket set was being discarded and every account reported none.
+    "User-Agent": antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64",
+    "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
+    "Client-Metadata": antigravityHeaders["Client-Metadata"]
+  };
+  const ask = async (host, project) => {
+    const response = await fetchWithTimeout2(`${host}/v1internal:retrieveUserQuota`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-        "User-Agent": userAgent,
-        ...headers
-      },
-      body: JSON.stringify(body)
+      headers,
+      body: JSON.stringify({ project })
     });
-    if (!response.ok) return void 0;
-    return await response.json();
+    if (!response.ok) return [];
+    const data = await response.json();
+    return data.buckets ?? [];
   };
   try {
-    const antigravityHeaders = getAntigravityHeaders();
-    const asAntigravity = await ask(antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64", {
-      "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
-      "Client-Metadata": antigravityHeaders["Client-Metadata"]
-    });
-    if (asAntigravity) return asAntigravity;
-    const asCli = await ask(geminiCliUserAgent);
-    if (asCli) return asCli;
-    return { buckets: [] };
+    const targets = [[ANTIGRAVITY_ENDPOINT_PROD, projectId]];
+    if (consumerProjectId && consumerProjectId !== projectId) {
+      targets.push([ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId]);
+    }
+    const seen = /* @__PURE__ */ new Set();
+    const buckets = [];
+    for (const [host, project] of targets) {
+      for (const bucket of await ask(host, project)) {
+        if (!bucket.modelId) continue;
+        const key = `${bucket.modelId}@${bucket.resetTime ?? ""}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        buckets.push(bucket);
+      }
+    }
+    return { buckets };
   } catch {
     return { buckets: [] };
   }
 }
-function aggregateGeminiCliQuota(response) {
-  const models = [];
-  if (!response.buckets || response.buckets.length === 0) {
-    return { models };
+function aggregateBuckets(response) {
+  const groups = {};
+  const seenModels = /* @__PURE__ */ new Set();
+  let totalCount = 0;
+  for (const bucket of response.buckets ?? []) {
+    if (!bucket.modelId) continue;
+    const group = classifyQuotaGroup(bucket.modelId);
+    if (!group) continue;
+    totalCount += 1;
+    seenModels.add(group);
+    const key = bucket.resetTime ?? "";
+    const existing = groups[group];
+    const current = existing?.windows.find((window2) => (window2.resetTime ?? "") === key);
+    const remainingFraction = normalizeRemainingFraction(bucket.remainingFraction);
+    if (current) {
+      if (remainingFraction < (current.remainingFraction ?? 1)) {
+        current.remainingFraction = remainingFraction;
+      }
+      current.modelCount += 1;
+      continue;
+    }
+    const window = {
+      modelCount: 1,
+      ...remainingFraction !== void 0 ? { remainingFraction } : {},
+      ...bucket.resetTime ? { resetTime: bucket.resetTime } : {}
+    };
+    groups[group] = {
+      windows: [...existing?.windows ?? [], window],
+      modelCount: (existing?.modelCount ?? 0) + 1
+    };
   }
-  for (const bucket of response.buckets) {
-    if (!bucket.modelId) {
-      continue;
-    }
-    const modelId = bucket.modelId;
-    const isRelevantModel = modelId.startsWith("gemini-3-") || modelId === "gemini-2.5-pro";
-    if (!isRelevantModel) {
-      continue;
-    }
-    models.push({
-      modelId: bucket.modelId,
-      remainingFraction: normalizeRemainingFraction(bucket.remainingFraction),
-      resetTime: bucket.resetTime
+  for (const summary of Object.values(groups)) {
+    if (!summary) continue;
+    summary.windows.sort((a, b) => {
+      const at = Date.parse(a.resetTime ?? "");
+      const bt = Date.parse(b.resetTime ?? "");
+      if (Number.isFinite(at) && Number.isFinite(bt)) return at - bt;
+      return Number.isFinite(at) ? -1 : Number.isFinite(bt) ? 1 : 0;
     });
   }
-  models.sort((a, b) => a.modelId.localeCompare(b.modelId));
-  return { models };
+  return { groups, modelCount: totalCount };
 }
 function applyAccountUpdates(account, auth) {
   const parts = parseRefreshParts(auth.refresh);
@@ -9810,28 +9855,22 @@ async function checkAccountQuota(account, index, client, providerId) {
       auth = projectContext.auth;
       subscription = projectContext.subscription;
       const updatedAccount = applyAccountUpdates(account, auth);
-      let quotaResult;
-      let geminiCliQuotaResult;
-      const [antigravityResponse, geminiCliResponse] = await Promise.all([
-        fetchAvailableModels(auth.access ?? "", projectContext.effectiveProjectId).catch((error) => ({ models: void 0 })),
-        fetchGeminiCliQuota(auth.access ?? "", projectContext.effectiveProjectId)
+      const [modelsResponse, bucketsResponse] = await Promise.all([
+        fetchAvailableModels(auth.access ?? "", projectContext.effectiveProjectId).catch(
+          () => ({ models: void 0 })
+        ),
+        fetchQuotaBuckets(
+          auth.access ?? "",
+          projectContext.effectiveProjectId,
+          projectContext.consumerProjectId
+        )
       ]);
-      if (antigravityResponse.models === void 0) {
-        quotaResult = {
-          groups: {},
-          modelCount: 0,
-          error: "Failed to fetch Antigravity quota"
-        };
-      } else {
-        quotaResult = aggregateQuota(antigravityResponse.models);
-      }
-      geminiCliQuotaResult = aggregateGeminiCliQuota(geminiCliResponse);
-      if (geminiCliResponse.buckets === void 0 || geminiCliResponse.buckets.length === 0) {
-        geminiCliQuotaResult.error = geminiCliQuotaResult.models.length === 0 ? "No Gemini CLI quota available" : void 0;
-      }
+      const fromBuckets = aggregateBuckets(bucketsResponse);
+      const quotaResult = fromBuckets.modelCount > 0 ? fromBuckets : modelsResponse.models === void 0 ? { groups: {}, modelCount: 0, error: "Failed to fetch Antigravity quota" } : aggregateQuota(modelsResponse.models);
       for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
-        const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
-        logQuotaStatus(account.email, index, remainingPercent, family);
+        for (const window of groupQuota?.windows ?? []) {
+          logQuotaStatus(account.email, index, (window.remainingFraction ?? 0) * 100, family);
+        }
       }
       return {
         index,
@@ -9839,7 +9878,6 @@ async function checkAccountQuota(account, index, client, providerId) {
         status: "ok",
         disabled,
         quota: quotaResult,
-        geminiCliQuota: geminiCliQuotaResult,
         updatedAccount,
         ...subscription ? { subscription } : {}
       };
@@ -12217,44 +12255,28 @@ Alternatively, you can:
                         }
                         return ` (resets in ${formatWaitTime(ms)})`;
                       };
-                      const hasGeminiCli = res.geminiCliQuota && res.geminiCliQuota.models.length > 0;
+                      const groups = res.quota?.groups ?? {};
+                      const groupEntries = [
+                        { name: "Claude", data: groups.claude },
+                        { name: "Gemini 3 Pro", data: groups["gemini-pro"] },
+                        { name: "Gemini 3 Flash", data: groups["gemini-flash"] }
+                      ].filter((g) => g.data);
+                      const hasAntigravity = groupEntries.length > 0;
                       console.log(`
-  \u250C\u2500 Gemini CLI Quota`);
-                      if (!hasGeminiCli) {
-                        const errorMsg = res.geminiCliQuota?.error || "No Gemini CLI quota available";
-                        console.log(`  \u2502  \u2514\u2500 ${errorMsg}`);
-                      } else {
-                        const models = res.geminiCliQuota.models;
-                        models.forEach((model, idx) => {
-                          const isLast = idx === models.length - 1;
-                          const connector = isLast ? "\u2514\u2500" : "\u251C\u2500";
-                          const bar = createProgressBar(model.remainingFraction);
-                          const reset = formatReset(model.resetTime);
-                          const modelName = model.modelId.padEnd(29);
-                          console.log(`  \u2502  ${connector} ${modelName} ${bar}${reset}`);
-                        });
-                      }
-                      const hasAntigravity = res.quota && Object.keys(res.quota.groups).length > 0;
-                      console.log(`  \u2502`);
-                      console.log(`  \u2514\u2500 Antigravity Quota`);
+  \u2514\u2500 Antigravity Quota`);
                       if (!hasAntigravity) {
-                        const errorMsg = res.quota?.error || "No quota information available";
-                        console.log(`     \u2514\u2500 ${errorMsg}`);
+                        console.log(`     \u2514\u2500 ${res.quota?.error || "No quota information available"}`);
                       } else {
-                        const groups = res.quota.groups;
-                        const groupEntries = [
-                          { name: "Claude", data: groups.claude },
-                          { name: "Gemini 3 Pro", data: groups["gemini-pro"] },
-                          { name: "Gemini 3 Flash", data: groups["gemini-flash"] }
-                        ].filter((g) => g.data);
-                        groupEntries.forEach((g, idx) => {
-                          const isLast = idx === groupEntries.length - 1;
-                          const connector = isLast ? "\u2514\u2500" : "\u251C\u2500";
-                          const bar = createProgressBar(g.data.remainingFraction);
-                          const reset = formatReset(g.data.resetTime);
-                          const modelName = g.name.padEnd(29);
-                          console.log(`     ${connector} ${modelName} ${bar}${reset}`);
-                        });
+                        let first = true;
+                        for (const g of groupEntries) {
+                          for (const w of g.data.windows) {
+                            const bar = createProgressBar(w.remainingFraction);
+                            const reset = formatReset(w.resetTime);
+                            const connector = first && g.data.windows[g.data.windows.length - 1] === w ? "\u2514\u2500" : "\u251C\u2500";
+                            first = false;
+                            console.log(`     ${connector} ${g.name.padEnd(29)} ${bar}${reset}`);
+                          }
+                        }
                       }
                       console.log("");
                       if (res.quota?.groups) {
@@ -13101,16 +13123,6 @@ var quotaGroupSchema = {
   required: ["id", "label", "remainingPercent", "modelCount"],
   additionalProperties: false
 };
-var geminiCliModelSchema = {
-  type: "object",
-  properties: {
-    modelId: { type: "string" },
-    remainingPercent: { type: "number" },
-    resetTime: { type: "string" }
-  },
-  required: ["modelId", "remainingPercent"],
-  additionalProperties: false
-};
 var accountSchema = {
   type: "object",
   properties: {
@@ -13120,11 +13132,9 @@ var accountSchema = {
     error: { type: "string" },
     enabled: { type: "boolean" },
     subscription: { type: "object" },
-    groups: { type: "array", items: quotaGroupSchema },
-    geminiCli: { type: "array", items: geminiCliModelSchema },
-    geminiCliError: { type: "string" }
+    groups: { type: "array", items: quotaGroupSchema }
   },
-  required: ["index", "status", "enabled", "groups", "geminiCli"],
+  required: ["index", "status", "enabled", "groups"],
   additionalProperties: false
 };
 var AntigravityRpc = Rpc.define({
@@ -13168,20 +13178,18 @@ function toAccount(result) {
   for (const id of Object.keys(rawGroups)) {
     const summary = rawGroups[id];
     if (!summary) continue;
-    groups.push({
-      id,
-      label: GROUP_LABELS[id] ?? id,
-      remainingPercent: toPercent(summary.remainingFraction),
-      ...summary.resetTime ? { resetTime: summary.resetTime } : {},
-      ...windowMinutes(summary.resetTime) !== void 0 ? { windowMinutes: windowMinutes(summary.resetTime) } : {},
-      modelCount: summary.modelCount
-    });
+    for (const window of summary.windows) {
+      const minutes = windowMinutes(window.resetTime);
+      groups.push({
+        id,
+        label: GROUP_LABELS[id] ?? id,
+        remainingPercent: toPercent(window.remainingFraction),
+        ...window.resetTime ? { resetTime: window.resetTime } : {},
+        ...minutes !== void 0 ? { windowMinutes: minutes } : {},
+        modelCount: window.modelCount
+      });
+    }
   }
-  const geminiCli = (result.geminiCliQuota?.models ?? []).map((model) => ({
-    modelId: model.modelId,
-    remainingPercent: toPercent(model.remainingFraction),
-    ...model.resetTime ? { resetTime: model.resetTime } : {}
-  }));
   return {
     index: result.index,
     ...result.email ? { email: result.email } : {},
@@ -13189,9 +13197,7 @@ function toAccount(result) {
     ...result.error ? { error: result.error } : {},
     enabled: result.disabled !== true,
     ...result.subscription ? { subscription: result.subscription } : {},
-    groups,
-    geminiCli,
-    ...result.geminiCliQuota?.error ? { geminiCliError: result.geminiCliQuota.error } : {}
+    groups
   };
 }
 function createAntigravityQuotaHandler(client) {

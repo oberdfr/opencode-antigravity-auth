@@ -61,9 +61,18 @@ function restoreFromCache(auth, cached) {
             // Carried back, or a warmed account would come back with its project but
             // no plan, which reads as an account that is not a subscription.
             ...(plan ? { subscription: plan } : {}),
+            // Likewise for the consumer project: without it the weekly allowance is not
+            // read at all, so a warm read would report the five-hour window alone and
+            // a subscription account would look like it only has that one.
+            ...(cached.consumerProjectId ? { consumerProjectId: cached.consumerProjectId } : {}),
         };
     }
-    return { auth, effectiveProjectId: cached.effectiveProjectId, ...(plan ? { subscription: plan } : {}) };
+    return {
+        auth,
+        effectiveProjectId: cached.effectiveProjectId,
+        ...(plan ? { subscription: plan } : {}),
+        ...(cached.consumerProjectId ? { consumerProjectId: cached.consumerProjectId } : {}),
+    };
 }
 async function readProjectContextCache() {
     try {
@@ -154,6 +163,15 @@ function buildOnboardMetadata(projectId) {
  * `paidTier` is the field that answers this. `currentTier` reports "free-tier"
  * even for a paid subscription, so on its own it cannot tell one from the other.
  */
+/**
+ * The consumer project the lookup names.
+ *
+ * Only used to ask for the weekly allowance, which the autopush host serves under
+ * this project and not under the one requests are made with.
+ */
+function readConsumerProjectId(payload) {
+    return extractManagedProjectId(payload);
+}
 function readPaidTier(payload) {
     const id = payload?.paidTier?.id;
     if (!id)
@@ -408,14 +426,16 @@ export async function ensureProjectContext(auth) {
                 return { ...known, subscription: remembered.subscription };
             const payload = await loadManagedProject(accessToken, parts.projectId ?? parts.managedProjectId);
             const subscription = readPaidTier(payload);
-            if (!subscription)
+            const consumerProjectId = readConsumerProjectId(payload);
+            if (!subscription && !consumerProjectId)
                 return known;
             await writeProjectContextCache(cacheKeyHash(stableKey ?? auth.refresh.trim()), {
                 cachedAt: Date.now(),
                 effectiveProjectId: parts.managedProjectId,
                 subscription,
+                consumerProjectId,
             });
-            return { ...known, subscription };
+            return { ...known, subscription, consumerProjectId };
         }
         // The lookup is made for the plan, not for a project.
         //
@@ -432,9 +452,13 @@ export async function ensureProjectContext(auth) {
         const fallbackProjectId = parts.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID;
         const loadPayload = await loadManagedProject(accessToken, fallbackProjectId);
         const subscription = readPaidTier(loadPayload);
-        return subscription
-            ? { auth, effectiveProjectId: fallbackProjectId, subscription }
-            : { auth, effectiveProjectId: fallbackProjectId };
+        const consumerProjectId = readConsumerProjectId(loadPayload);
+        return {
+            auth,
+            effectiveProjectId: fallbackProjectId,
+            ...(subscription ? { subscription } : {}),
+            ...(consumerProjectId ? { consumerProjectId } : {}),
+        };
     };
     if (!cacheKey) {
         return resolveContext();
@@ -451,7 +475,11 @@ export async function ensureProjectContext(auth) {
         // lookup, so an entry without a plan holds nothing that a later fix to the
         // request would not change, and caching it would keep the cache from
         // picking up that fix for a whole TTL.
-        if (!result.subscription)
+        // Only the plan and the consumer project are worth remembering. The project
+        // requests are made with no longer comes from here, so an entry without them
+        // holds nothing a later fix to the request would not change, and caching it
+        // would keep the cache from picking up that fix for a whole TTL.
+        if (!result.subscription && !result.consumerProjectId)
             return result;
         // Persist the outcome under both keys: the lookup may have produced a
         // managed project, which rewrites the refresh token, so the next process
@@ -462,6 +490,10 @@ export async function ensureProjectContext(auth) {
                 cachedAt: Date.now(),
                 effectiveProjectId: result.effectiveProjectId,
                 ...(result.subscription ? { subscription: result.subscription } : {}),
+                // The weekly allowance is only served on the autopush host when asked
+                // with this project, so a warm read that has forgotten it reports the
+                // five-hour window alone and looks like the account has just the one.
+                ...(result.consumerProjectId ? { consumerProjectId: result.consumerProjectId } : {}),
                 ...(parts.managedProjectId ? { managedProjectId: parts.managedProjectId } : {}),
                 ...(parts.projectId ? { projectId: parts.projectId } : {}),
             });

@@ -2076,47 +2076,33 @@ export const createAntigravityPlugin = (providerId) => async ({ client, director
                                                 }
                                                 return ` (resets in ${formatWaitTime(ms)})`;
                                             };
-                                            // Display Gemini CLI Quota first (as requested - swap order)
-                                            const hasGeminiCli = res.geminiCliQuota && res.geminiCliQuota.models.length > 0;
-                                            console.log(`\n  ┌─ Gemini CLI Quota`);
-                                            if (!hasGeminiCli) {
-                                                const errorMsg = res.geminiCliQuota?.error || "No Gemini CLI quota available";
-                                                console.log(`  │  └─ ${errorMsg}`);
-                                            }
-                                            else {
-                                                const models = res.geminiCliQuota.models;
-                                                models.forEach((model, idx) => {
-                                                    const isLast = idx === models.length - 1;
-                                                    const connector = isLast ? "└─" : "├─";
-                                                    const bar = createProgressBar(model.remainingFraction);
-                                                    const reset = formatReset(model.resetTime);
-                                                    const modelName = model.modelId.padEnd(29);
-                                                    console.log(`  │  ${connector} ${modelName} ${bar}${reset}`);
-                                                });
-                                            }
-                                            // Display Antigravity Quota second
-                                            const hasAntigravity = res.quota && Object.keys(res.quota.groups).length > 0;
-                                            console.log(`  │`);
-                                            console.log(`  └─ Antigravity Quota`);
+                                            // One section, one line per window. A family runs on a five-hour
+                                            // window and a weekly one at the same time, and both are read
+                                            // from the same buckets, so a second section would only repeat
+                                            // the same figures under a heading that is no longer what the
+                                            // request is.
+                                            const groups = res.quota?.groups ?? {};
+                                            const groupEntries = [
+                                                { name: "Claude", data: groups.claude },
+                                                { name: "Gemini 3 Pro", data: groups["gemini-pro"] },
+                                                { name: "Gemini 3 Flash", data: groups["gemini-flash"] },
+                                            ].filter(g => g.data);
+                                            const hasAntigravity = groupEntries.length > 0;
+                                            console.log(`\n  └─ Antigravity Quota`);
                                             if (!hasAntigravity) {
-                                                const errorMsg = res.quota?.error || "No quota information available";
-                                                console.log(`     └─ ${errorMsg}`);
+                                                console.log(`     └─ ${res.quota?.error || "No quota information available"}`);
                                             }
                                             else {
-                                                const groups = res.quota.groups;
-                                                const groupEntries = [
-                                                    { name: "Claude", data: groups.claude },
-                                                    { name: "Gemini 3 Pro", data: groups["gemini-pro"] },
-                                                    { name: "Gemini 3 Flash", data: groups["gemini-flash"] },
-                                                ].filter(g => g.data);
-                                                groupEntries.forEach((g, idx) => {
-                                                    const isLast = idx === groupEntries.length - 1;
-                                                    const connector = isLast ? "└─" : "├─";
-                                                    const bar = createProgressBar(g.data.remainingFraction);
-                                                    const reset = formatReset(g.data.resetTime);
-                                                    const modelName = g.name.padEnd(29);
-                                                    console.log(`     ${connector} ${modelName} ${bar}${reset}`);
-                                                });
+                                                let first = true;
+                                                for (const g of groupEntries) {
+                                                    for (const w of g.data.windows) {
+                                                        const bar = createProgressBar(w.remainingFraction);
+                                                        const reset = formatReset(w.resetTime);
+                                                        const connector = first && g.data.windows[g.data.windows.length - 1] === w ? "└─" : "├─";
+                                                        first = false;
+                                                        console.log(`     ${connector} ${g.name.padEnd(29)} ${bar}${reset}`);
+                                                    }
+                                                }
                                             }
                                             console.log("");
                                             // Cache quota data for soft quota protection

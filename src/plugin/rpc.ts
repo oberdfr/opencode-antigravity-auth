@@ -20,6 +20,8 @@ const GROUP_LABELS: Record<QuotaGroup, string> = {
   "gemini-flash": "Gemini Flash",
 };
 
+// One entry per window a family runs on, so the same family appears once for its
+// five-hour window and once for its weekly one.
 const quotaGroupSchema = {
   type: "object",
   properties: {
@@ -36,17 +38,6 @@ const quotaGroupSchema = {
   additionalProperties: false,
 } as const;
 
-const geminiCliModelSchema = {
-  type: "object",
-  properties: {
-    modelId: { type: "string" },
-    remainingPercent: { type: "number" },
-    resetTime: { type: "string" },
-  },
-  required: ["modelId", "remainingPercent"],
-  additionalProperties: false,
-} as const;
-
 const accountSchema = {
   type: "object",
   properties: {
@@ -57,10 +48,8 @@ const accountSchema = {
     enabled: { type: "boolean" },
     subscription: { type: "object" },
     groups: { type: "array", items: quotaGroupSchema },
-    geminiCli: { type: "array", items: geminiCliModelSchema },
-    geminiCliError: { type: "string" },
   },
-  required: ["index", "status", "enabled", "groups", "geminiCli"],
+  required: ["index", "status", "enabled", "groups"],
   additionalProperties: false,
 } as const;
 
@@ -106,8 +95,6 @@ export type AntigravityQuotaOutput = {
       modelCount: number;
       windowMinutes?: number;
     }>;
-    geminiCli: Array<{ modelId: string; remainingPercent: number; resetTime?: string }>;
-    geminiCliError?: string;
   }>;
 };
 
@@ -138,26 +125,26 @@ function toAccount(result: AccountQuotaResult): AntigravityQuotaOutput["accounts
   const rawGroups = result.quota?.groups ?? {};
   const groups: AntigravityQuotaOutput["accounts"][number]["groups"] = [];
 
+  // One row per window rather than per family, because a family can run on more
+  // than one at a time and a single row can only say what is left on one of them.
+  // A family with a five-hour window and a weekly one therefore produces two rows
+  // that share a label and differ by when they refill.
   for (const id of Object.keys(rawGroups) as QuotaGroup[]) {
     const summary = rawGroups[id];
     if (!summary) continue;
-    groups.push({
-      id,
-      label: GROUP_LABELS[id] ?? id,
-      remainingPercent: toPercent(summary.remainingFraction),
-      ...(summary.resetTime ? { resetTime: summary.resetTime } : {}),
-      ...(windowMinutes(summary.resetTime) !== undefined
-        ? { windowMinutes: windowMinutes(summary.resetTime) as number }
-        : {}),
-      modelCount: summary.modelCount,
-    });
+    for (const window of summary.windows) {
+      const minutes = windowMinutes(window.resetTime);
+      groups.push({
+        id,
+        label: GROUP_LABELS[id] ?? id,
+        remainingPercent: toPercent(window.remainingFraction),
+        ...(window.resetTime ? { resetTime: window.resetTime } : {}),
+        ...(minutes !== undefined ? { windowMinutes: minutes } : {}),
+        modelCount: window.modelCount,
+      });
+    }
   }
 
-  const geminiCli = (result.geminiCliQuota?.models ?? []).map((model) => ({
-    modelId: model.modelId,
-    remainingPercent: toPercent(model.remainingFraction),
-    ...(model.resetTime ? { resetTime: model.resetTime } : {}),
-  }));
 
   return {
     index: result.index,
@@ -167,8 +154,6 @@ function toAccount(result: AccountQuotaResult): AntigravityQuotaOutput["accounts
     enabled: result.disabled !== true,
     ...(result.subscription ? { subscription: result.subscription } : {}),
     groups,
-    geminiCli,
-    ...(result.geminiCliQuota?.error ? { geminiCliError: result.geminiCliQuota.error } : {}),
   };
 }
 

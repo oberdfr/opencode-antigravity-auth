@@ -119,5 +119,14 @@ export interface ProjectContextResult {
     id: string;
     name?: string;
   };
+  /**
+   * The consumer project the lookup named, kept for the weekly allowance only.
+   *
+   * Not used for requests: generation rejects it, and the default project is what
+   * works. It is carried because the weekly allowance is only served on the
+   * autopush host when asked with this project, and that pool is invisible without
+   * it.
+   */
+  consumerProjectId?: string;
 }
 

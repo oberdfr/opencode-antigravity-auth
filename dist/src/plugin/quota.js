@@ -1,4 +1,4 @@
-import { ANTIGRAVITY_ENDPOINT_PROD, getAntigravityHeaders, ANTIGRAVITY_PROVIDER_ID, } from "../constants";
+import { ANTIGRAVITY_ENDPOINT_AUTOPUSH, ANTIGRAVITY_ENDPOINT_PROD, getAntigravityHeaders, ANTIGRAVITY_PROVIDER_ID, } from "../constants";
 import { accessTokenExpired, formatRefreshParts, parseRefreshParts } from "./auth";
 import { logQuotaFetch, logQuotaStatus } from "./debug";
 import { ensureProjectContext } from "./project";
@@ -49,50 +49,30 @@ function classifyQuotaGroup(modelName, displayName) {
     const family = getModelFamily(modelName);
     return family === "gemini-flash" ? "gemini-flash" : "gemini-pro";
 }
+/**
+ * Groups the model list into families and windows.
+ *
+ * The fallback for when the buckets do not answer. A model here carries a single
+ * quota reading, so a family ends up with one window per distinct reset among its
+ * models, which is the same shape the buckets produce and lets both readings be
+ * rendered the same way.
+ */
 function aggregateQuota(models) {
-    const groups = {};
-    if (!models) {
-        return { groups, modelCount: 0 };
-    }
-    let totalCount = 0;
-    for (const [modelName, entry] of Object.entries(models)) {
-        const group = classifyQuotaGroup(modelName, entry.displayName ?? entry.modelName);
-        if (!group) {
+    const buckets = [];
+    for (const [modelName, entry] of Object.entries(models ?? {})) {
+        if (!classifyQuotaGroup(modelName, entry.displayName ?? entry.modelName)) {
             continue;
         }
         const quotaInfo = entry.quotaInfo;
-        const remainingFraction = quotaInfo
-            ? normalizeRemainingFraction(quotaInfo.remainingFraction)
-            : undefined;
-        const resetTime = quotaInfo?.resetTime;
-        const resetTimestamp = parseResetTime(resetTime);
-        totalCount += 1;
-        const existing = groups[group];
-        const nextCount = (existing?.modelCount ?? 0) + 1;
-        const nextRemaining = remainingFraction === undefined
-            ? existing?.remainingFraction
-            : existing?.remainingFraction === undefined
-                ? remainingFraction
-                : Math.min(existing.remainingFraction, remainingFraction);
-        let nextResetTime = existing?.resetTime;
-        if (resetTimestamp !== null) {
-            if (!existing?.resetTime) {
-                nextResetTime = resetTime;
-            }
-            else {
-                const existingTimestamp = parseResetTime(existing.resetTime);
-                if (existingTimestamp === null || resetTimestamp < existingTimestamp) {
-                    nextResetTime = resetTime;
-                }
-            }
-        }
-        groups[group] = {
-            remainingFraction: nextRemaining,
-            resetTime: nextResetTime,
-            modelCount: nextCount,
-        };
+        buckets.push({
+            modelId: modelName,
+            ...(quotaInfo?.remainingFraction !== undefined
+                ? { remainingFraction: quotaInfo.remainingFraction }
+                : {}),
+            ...(quotaInfo?.resetTime ? { resetTime: quotaInfo.resetTime } : {}),
+        });
     }
-    return { groups, modelCount: totalCount };
+    return aggregateBuckets({ buckets });
 }
 async function fetchWithTimeout(url, options, timeoutMs = FETCH_TIMEOUT_MS) {
     const controller = new AbortController();
@@ -126,80 +106,126 @@ async function fetchAvailableModels(accessToken, projectId) {
     errors.push(`fetchAvailableModels ${response.status} at ${endpoint}${snippet ? `: ${snippet}` : ""}`);
     throw new Error(errors.join("; ") || "fetchAvailableModels failed");
 }
-async function fetchGeminiCliQuota(accessToken, projectId) {
-    const endpoint = ANTIGRAVITY_ENDPOINT_PROD;
-    // Use Gemini CLI user-agent to get CLI quota buckets (not Antigravity buckets)
-    const platform = process.platform || "darwin";
-    const arch = process.arch || "arm64";
-    const geminiCliUserAgent = `GeminiCLI/1.0.0/gemini-2.5-pro (${platform}; ${arch})`;
-    const body = projectId ? { project: projectId } : {};
-    const ask = async (userAgent, headers) => {
-        const response = await fetchWithTimeout(`${endpoint}/v1internal:retrieveUserQuota`, {
+/**
+ * Reads every allowance window an account has.
+ *
+ * The windows are not all on the same host. The five-hour window is served by the
+ * production host, while the weekly one is only served by the autopush host, and
+ * only when asked with the consumer project the account lookup names: the same
+ * call with the project requests are made with answers 403 there. Asking one host
+ * and reporting what came back is why a subscription account used to look like it
+ * had a single window when it has two.
+ *
+ * Both sets are merged rather than one being preferred. A model can appear in
+ * both with the same reset, which is one window reported twice, and with different
+ * resets, which is two windows for the same model, so buckets are keyed by model
+ * and reset together and the later host only fills gaps.
+ */
+async function fetchQuotaBuckets(accessToken, projectId, consumerProjectId) {
+    const antigravityHeaders = getAntigravityHeaders();
+    const headers = {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+        // Asked as Antigravity. Asked as the Gemini CLI this same call answers 403
+        // SUBSCRIPTION_REQUIRED, which reads like the account has no quota at all, so
+        // the whole bucket set was being discarded and every account reported none.
+        "User-Agent": antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64",
+        "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
+        "Client-Metadata": antigravityHeaders["Client-Metadata"],
+    };
+    const ask = async (host, project) => {
+        const response = await fetchWithTimeout(`${host}/v1internal:retrieveUserQuota`, {
             method: "POST",
-            headers: {
-                Authorization: `Bearer ${accessToken}`,
-                "Content-Type": "application/json",
-                "User-Agent": userAgent,
-                ...headers,
-            },
-            body: JSON.stringify(body),
+            headers,
+            body: JSON.stringify({ project }),
         });
         if (!response.ok)
-            return undefined;
-        return (await response.json());
+            return [];
+        const data = (await response.json());
+        return data.buckets ?? [];
     };
     try {
-        // Asked as Antigravity first. Asked as the Gemini CLI this same call answers
-        // 403 SUBSCRIPTION_REQUIRED, which reads like the account has no CLI quota at
-        // all, so the whole bucket set was being thrown away. Asked as Antigravity it
-        // answers 200 with every model's remaining allowance and its own reset, and
-        // the accounts that answer with more than one reset are the ones with more
-        // than one window. The CLI identity is kept as a fallback for accounts that
-        // only answer to it.
-        const antigravityHeaders = getAntigravityHeaders();
-        const asAntigravity = await ask(antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64", {
-            "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
-            "Client-Metadata": antigravityHeaders["Client-Metadata"],
-        });
-        if (asAntigravity)
-            return asAntigravity;
-        const asCli = await ask(geminiCliUserAgent);
-        if (asCli)
-            return asCli;
-        // Non-OK response - return empty buckets
-        return { buckets: [] };
+        const targets = [[ANTIGRAVITY_ENDPOINT_PROD, projectId]];
+        if (consumerProjectId && consumerProjectId !== projectId) {
+            targets.push([ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId]);
+        }
+        const seen = new Set();
+        const buckets = [];
+        for (const [host, project] of targets) {
+            for (const bucket of await ask(host, project)) {
+                if (!bucket.modelId)
+                    continue;
+                // Keyed by both, because the same model on two windows is two allowances
+                // and the same model twice on one window is one.
+                const key = `${bucket.modelId}@${bucket.resetTime ?? ""}`;
+                if (seen.has(key))
+                    continue;
+                seen.add(key);
+                buckets.push(bucket);
+            }
+        }
+        return { buckets };
     }
     catch {
         // Network error or timeout - return empty buckets
         return { buckets: [] };
     }
 }
-function aggregateGeminiCliQuota(response) {
-    const models = [];
-    if (!response.buckets || response.buckets.length === 0) {
-        return { models };
+/**
+ * Groups allowances by family and by the window they refill on.
+ *
+ * A window is identified by its reset rather than by its length: two allowances
+ * that refill at the same moment are on the same window, and ones that differ are
+ * not whatever their length rounds to. Within a window the group reports the
+ * lowest allowance in it, since that is the one that decides when the account
+ * runs out.
+ */
+function aggregateBuckets(response) {
+    const groups = {};
+    const seenModels = new Set();
+    let totalCount = 0;
+    for (const bucket of response.buckets ?? []) {
+        if (!bucket.modelId)
+            continue;
+        const group = classifyQuotaGroup(bucket.modelId);
+        if (!group)
+            continue;
+        totalCount += 1;
+        seenModels.add(group);
+        const key = bucket.resetTime ?? "";
+        const existing = groups[group];
+        const current = existing?.windows.find((window) => (window.resetTime ?? "") === key);
+        const remainingFraction = normalizeRemainingFraction(bucket.remainingFraction);
+        if (current) {
+            if (remainingFraction < (current.remainingFraction ?? 1)) {
+                current.remainingFraction = remainingFraction;
+            }
+            current.modelCount += 1;
+            continue;
+        }
+        const window = {
+            modelCount: 1,
+            ...(remainingFraction !== undefined ? { remainingFraction } : {}),
+            ...(bucket.resetTime ? { resetTime: bucket.resetTime } : {}),
+        };
+        groups[group] = {
+            windows: [...(existing?.windows ?? []), window],
+            modelCount: (existing?.modelCount ?? 0) + 1,
+        };
     }
-    for (const bucket of response.buckets) {
-        if (!bucket.modelId) {
+    // Soonest first, so the window that frees up first is the one read first.
+    for (const summary of Object.values(groups)) {
+        if (!summary)
             continue;
-        }
-        // Filter out models we don't care about for Gemini CLI quotas
-        // Only show gemini-3-* and gemini-2.5-pro models (the premium ones)
-        const modelId = bucket.modelId;
-        const isRelevantModel = modelId.startsWith("gemini-3-") ||
-            modelId === "gemini-2.5-pro";
-        if (!isRelevantModel) {
-            continue;
-        }
-        models.push({
-            modelId: bucket.modelId,
-            remainingFraction: normalizeRemainingFraction(bucket.remainingFraction),
-            resetTime: bucket.resetTime,
+        summary.windows.sort((a, b) => {
+            const at = Date.parse(a.resetTime ?? "");
+            const bt = Date.parse(b.resetTime ?? "");
+            if (Number.isFinite(at) && Number.isFinite(bt))
+                return at - bt;
+            return Number.isFinite(at) ? -1 : Number.isFinite(bt) ? 1 : 0;
         });
     }
-    // Sort by model ID for consistent display
-    models.sort((a, b) => a.modelId.localeCompare(b.modelId));
-    return { models };
+    return { groups, modelCount: totalCount };
 }
 function applyAccountUpdates(account, auth) {
     const parts = parseRefreshParts(auth.refresh);
@@ -262,36 +288,25 @@ async function checkAccountQuota(account, index, client, providerId) {
             auth = projectContext.auth;
             subscription = projectContext.subscription;
             const updatedAccount = applyAccountUpdates(account, auth);
-            let quotaResult;
-            let geminiCliQuotaResult;
-            // Fetch both Antigravity and Gemini CLI quotas in parallel
-            const [antigravityResponse, geminiCliResponse] = await Promise.all([
-                fetchAvailableModels(auth.access ?? "", projectContext.effectiveProjectId)
-                    .catch((error) => ({ models: undefined })),
-                fetchGeminiCliQuota(auth.access ?? "", projectContext.effectiveProjectId),
+            // The buckets are the reading: they carry every window, including the
+            // weekly one that only the autopush host serves. The model list is fetched
+            // alongside as a fallback, since it is what a reading is built from when the
+            // buckets do not answer.
+            const [modelsResponse, bucketsResponse] = await Promise.all([
+                fetchAvailableModels(auth.access ?? "", projectContext.effectiveProjectId).catch(() => ({ models: undefined })),
+                fetchQuotaBuckets(auth.access ?? "", projectContext.effectiveProjectId, projectContext.consumerProjectId),
             ]);
-            // Process Antigravity quota
-            if (antigravityResponse.models === undefined) {
-                quotaResult = {
-                    groups: {},
-                    modelCount: 0,
-                    error: "Failed to fetch Antigravity quota",
-                };
-            }
-            else {
-                quotaResult = aggregateQuota(antigravityResponse.models);
-            }
-            // Process Gemini CLI quota
-            geminiCliQuotaResult = aggregateGeminiCliQuota(geminiCliResponse);
-            if (geminiCliResponse.buckets === undefined || geminiCliResponse.buckets.length === 0) {
-                geminiCliQuotaResult.error = geminiCliQuotaResult.models.length === 0
-                    ? "No Gemini CLI quota available"
-                    : undefined;
-            }
+            const fromBuckets = aggregateBuckets(bucketsResponse);
+            const quotaResult = fromBuckets.modelCount > 0
+                ? fromBuckets
+                : modelsResponse.models === undefined
+                    ? { groups: {}, modelCount: 0, error: "Failed to fetch Antigravity quota" }
+                    : aggregateQuota(modelsResponse.models);
             // Log quota status for each family
             for (const [family, groupQuota] of Object.entries(quotaResult.groups)) {
-                const remainingPercent = (groupQuota.remainingFraction ?? 0) * 100;
-                logQuotaStatus(account.email, index, remainingPercent, family);
+                for (const window of groupQuota?.windows ?? []) {
+                    logQuotaStatus(account.email, index, (window.remainingFraction ?? 0) * 100, family);
+                }
             }
             return {
                 index,
@@ -299,7 +314,6 @@ async function checkAccountQuota(account, index, client, providerId) {
                 status: "ok",
                 disabled,
                 quota: quotaResult,
-                geminiCliQuota: geminiCliQuotaResult,
                 updatedAccount,
                 ...(subscription ? { subscription } : {}),
             };
@@ -316,4 +330,13 @@ async function checkAccountQuota(account, index, client, providerId) {
         }
     }
 }
+/**
+ * The per-account quota read, exported for its tests.
+ *
+ * Exported under a name of its own rather than widened on the public surface: the
+ * only caller is `checkAccountsQuota`, and tests that reach through it cannot
+ * observe which hosts were asked or with what project, which is the part that
+ * decides whether the weekly allowance is read at all.
+ */
+export const checkAccountQuotaForTest = checkAccountQuota;
 //# sourceMappingURL=quota.js.map

@@ -158,6 +158,27 @@ export function resolveQuotaGroup(family, model) {
     }
     return family === "claude" ? "claude" : "gemini-pro";
 }
+/**
+ * The window of a family with the least left in it.
+ *
+ * A family runs on several windows at once — a subscription account has a
+ * five-hour one and a weekly one — and the one with the least left is what runs
+ * out first. Windows that report no figure at all are skipped rather than treated
+ * as empty, since a missing reading is not a spent one.
+ */
+function tightestWindow(summary) {
+    let tightest;
+    for (const window of summary?.windows ?? []) {
+        if (window.remainingFraction === undefined)
+            continue;
+        if (tightest === undefined ||
+            (tightest.remainingFraction !== undefined &&
+                window.remainingFraction < tightest.remainingFraction)) {
+            tightest = window;
+        }
+    }
+    return tightest;
+}
 function isOverSoftQuotaThreshold(account, family, thresholdPercent, cacheTtlMs, model) {
     if (thresholdPercent >= 100)
         return false;
@@ -170,14 +191,18 @@ function isOverSoftQuotaThreshold(account, family, thresholdPercent, cacheTtlMs,
         return false;
     const quotaGroup = resolveQuotaGroup(family, model);
     const groupData = account.cachedQuota[quotaGroup];
-    if (groupData?.remainingFraction == null)
+    // The window closest to exhausted is the one that decides whether to route
+    // around this account: a family runs on several at once, and the one with the
+    // least left is what runs out first, whichever it is.
+    const tightest = tightestWindow(groupData);
+    if (tightest?.remainingFraction == null)
         return false;
-    const remainingFraction = Math.max(0, Math.min(1, groupData.remainingFraction));
+    const remainingFraction = Math.max(0, Math.min(1, tightest.remainingFraction));
     const usedPercent = (1 - remainingFraction) * 100;
     const isOverThreshold = usedPercent >= thresholdPercent;
     if (isOverThreshold) {
         const accountLabel = formatAccountLabel(account.email, account.index);
-        const resetSuffix = groupData.resetTime ? ` (resets: ${groupData.resetTime})` : "";
+        const resetSuffix = tightest.resetTime ? ` (resets: ${tightest.resetTime})` : "";
         const message = `[SoftQuota] Skipping ${accountLabel}: ${quotaGroup} usage ${usedPercent.toFixed(1)}% >= threshold ${thresholdPercent}%${resetSuffix}`;
         debugLogToFile(message);
     }
@@ -979,8 +1004,12 @@ export class AccountManager {
         const waitTimes = [];
         for (const acc of enabled) {
             const groupData = acc.cachedQuota?.[quotaGroup];
-            if (groupData?.resetTime) {
-                const resetTimestamp = Date.parse(groupData.resetTime);
+            // Every window counts here, not just the tightest: waiting for the one that
+            // is nearly full would still leave the model unusable on the others.
+            for (const window of groupData?.windows ?? []) {
+                if (!window.resetTime)
+                    continue;
+                const resetTimestamp = Date.parse(window.resetTime);
                 if (Number.isFinite(resetTimestamp)) {
                     waitTimes.push(Math.max(0, resetTimestamp - now));
                 }
