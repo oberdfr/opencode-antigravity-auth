@@ -12,6 +12,17 @@ interface LoadCodeAssistPayload {
         id?: string;
     };
     allowedTiers?: AntigravityUserTier[];
+    /**
+     * The plan the account is entitled to.
+     *
+     * `currentTier` is "free-tier" even for a paid subscription, so it does not
+     * say whether the account is one. `paidTier` does: "g1-pro-tier" for Google AI
+     * Pro, "free-tier" otherwise.
+     */
+    paidTier?: {
+        id?: string;
+        name?: string;
+    };
 }
 /**
  * Clears cached project context results and pending promises, globally or for a refresh key.

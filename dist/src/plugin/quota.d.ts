@@ -30,6 +30,11 @@ export interface AccountQuotaResult {
     quota?: QuotaSummary;
     geminiCliQuota?: GeminiCliQuotaSummary;
     updatedAccount?: AccountMetadataV3;
+    /** The account's plan, when project resolution reported one. */
+    subscription?: {
+        id: string;
+        name?: string;
+    };
 }
 export declare function checkAccountsQuota(accounts: AccountMetadataV3[], client: PluginClient, providerId?: string): Promise<AccountQuotaResult[]>;
 //# sourceMappingURL=quota.d.ts.map

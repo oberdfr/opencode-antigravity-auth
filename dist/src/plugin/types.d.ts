@@ -93,5 +93,16 @@ export interface RefreshParts {
 export interface ProjectContextResult {
     auth: OAuthAuthDetails;
     effectiveProjectId: string;
+    /**
+     * The plan the account is entitled to, when the lookup reported one.
+     *
+     * Only present once project resolution has succeeded, since that is the call
+     * that answers. `id` is "g1-pro-tier" for a Google AI Pro subscription and
+     * "free-tier" otherwise; `name` is the readable form.
+     */
+    subscription?: {
+        id: string;
+        name?: string;
+    };
 }
 //# sourceMappingURL=types.d.ts.map

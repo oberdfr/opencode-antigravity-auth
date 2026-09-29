@@ -58,6 +58,8 @@ interface CachedProjectContext {
   managedProjectId?: string;
   /** Project id already on the account, kept so it can be restored onto the auth. */
   projectId?: string;
+  /** The plan the account is entitled to, when the lookup reported one. */
+  subscription?: { id: string; name?: string };
 }
 
 type ProjectContextCacheFile = Record<string, CachedProjectContext>;
@@ -73,6 +75,7 @@ function cacheKeyHash(refresh: string): string {
 
 /** Re-applies a cached project resolution onto the caller's current auth. */
 function restoreFromCache(auth: OAuthAuthDetails, cached: CachedProjectContext): ProjectContextResult {
+  const plan = cached.subscription;
   const parts = parseRefreshParts(auth.refresh);
   if (cached.managedProjectId && parts.refreshToken) {
     return {
@@ -85,9 +88,12 @@ function restoreFromCache(auth: OAuthAuthDetails, cached: CachedProjectContext):
         }),
       },
       effectiveProjectId: cached.effectiveProjectId,
+      // Carried back, or a warmed account would come back with its project but
+      // no plan, which reads as an account that is not a subscription.
+      ...(plan ? { subscription: plan } : {}),
     };
   }
-  return { auth, effectiveProjectId: cached.effectiveProjectId };
+  return { auth, effectiveProjectId: cached.effectiveProjectId, ...(plan ? { subscription: plan } : {}) };
 }
 
 async function readProjectContextCache(): Promise<ProjectContextCacheFile> {
@@ -136,6 +142,19 @@ async function writeProjectContextCache(key: string, value: CachedProjectContext
   });
 }
 
+/**
+ * Metadata for the loadCodeAssist call.
+ *
+ * Only `ideType` is sent. Adding `platform` and `pluginType` makes Google answer
+ * 400, so the call fails and the account silently falls back to the default
+ * project with no tier, which is what hid the subscription from the quota
+ * report. Verified by trying the shapes: `{ideType}` answers 200, the fuller one
+ * answers 400.
+ */
+const LOAD_CODE_ASSIST_METADATA = {
+  ideType: "ANTIGRAVITY",
+} as const;
+
 const CODE_ASSIST_METADATA = {
   ideType: "ANTIGRAVITY",
   platform: process.platform === "win32" ? "WINDOWS" : "MACOS",
@@ -154,6 +173,17 @@ interface LoadCodeAssistPayload {
     id?: string;
   };
   allowedTiers?: AntigravityUserTier[];
+  /**
+   * The plan the account is entitled to.
+   *
+   * `currentTier` is "free-tier" even for a paid subscription, so it does not
+   * say whether the account is one. `paidTier` does: "g1-pro-tier" for Google AI
+   * Pro, "free-tier" otherwise.
+   */
+  paidTier?: {
+    id?: string;
+    name?: string;
+  };
 }
 
 interface OnboardUserPayload {
@@ -165,7 +195,18 @@ interface OnboardUserPayload {
   };
 }
 
-function buildMetadata(projectId?: string): Record<string, string> {
+/**
+ * Metadata for the loadCodeAssist call.
+ *
+ * Only `ideType` is sent here. See LOAD_CODE_ASSIST_METADATA for why the extra
+ * fields cannot be included.
+ */
+function buildMetadata(): Record<string, string> {
+  return { ideType: LOAD_CODE_ASSIST_METADATA.ideType };
+}
+
+/** Metadata for the onboard call, which does take the richer shape. */
+function buildOnboardMetadata(projectId?: string): Record<string, string> {
   const metadata: Record<string, string> = {
     ideType: CODE_ASSIST_METADATA.ideType,
     platform: CODE_ASSIST_METADATA.platform,
@@ -175,6 +216,19 @@ function buildMetadata(projectId?: string): Record<string, string> {
     metadata.duetProject = projectId;
   }
   return metadata;
+}
+
+/**
+ * Reads the plan an account is entitled to.
+ *
+ * `paidTier` is the field that answers this. `currentTier` reports "free-tier"
+ * even for a paid subscription, so on its own it cannot tell one from the other.
+ */
+function readPaidTier(payload: LoadCodeAssistPayload | null): ProjectContextResult["subscription"] {
+  const id = payload?.paidTier?.id;
+  if (!id) return undefined;
+  const name = payload?.paidTier?.name;
+  return { id, ...(name ? { name } : {}) };
 }
 
 /**
@@ -223,6 +277,20 @@ function extractManagedProjectId(payload: LoadCodeAssistPayload | null): string 
 function getCacheKey(auth: OAuthAuthDetails): string | undefined {
   const refresh = auth.refresh?.trim();
   return refresh ? refresh : undefined;
+}
+
+/**
+ * The stable part of a refresh token, used as the cache key.
+ *
+ * A refresh token can carry the resolved project appended to it, and resolving
+ * rewrites it, so keying on the whole string meant an account that had been
+ * resolved once was looked up under a different key than before and never found
+ * its own entry. The bare token does not change, and the project is exactly the
+ * thing the entry holds.
+ */
+function getStableCacheKey(auth: OAuthAuthDetails): string | undefined {
+  const parts = parseRefreshParts(auth.refresh);
+  return parts.refreshToken || undefined;
 }
 
 /**
@@ -285,13 +353,17 @@ export async function loadManagedProject(
   accessToken: string,
   projectId?: string,
 ): Promise<LoadCodeAssistPayload | null> {
-  const metadata = buildMetadata(projectId);
+  const metadata = buildMetadata();
   const requestBody: Record<string, unknown> = { metadata };
 
   const loadHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${accessToken}`,
-    "User-Agent": "google-api-nodejs-client/9.15.1",
+    // The Antigravity User-Agent, not the Google API client's. Asked as the
+    // Google client the endpoint answers 200 with a body that has no
+    // currentTier and no paidTier in it, so the account's plan was never
+    // reported and the lookup looked like it had nothing to say.
+    "User-Agent": getAntigravityHeaders()["User-Agent"] ?? "antigravity/windows/amd64",
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": getAntigravityHeaders()["Client-Metadata"],
   };
@@ -346,7 +418,7 @@ export async function onboardManagedProject(
   attempts = 10,
   delayMs = 5000,
 ): Promise<string | undefined> {
-  const metadata = buildMetadata(projectId);
+  const metadata = buildOnboardMetadata(projectId);
   const requestBody: Record<string, unknown> = {
     tierId,
     metadata,
@@ -402,6 +474,9 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
   }
 
   const cacheKey = getCacheKey(auth);
+  // Stable across project resolution, so an account that already resolved its
+  // project still finds what was remembered about it.
+  const stableKey = getStableCacheKey(auth);
   if (cacheKey) {
     const cached = projectContextResultCache.get(cacheKey);
     if (cached) {
@@ -414,7 +489,7 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
 
     // The in-memory maps are empty in a fresh process, so fall back to what the
     // last one learned before paying for the lookup again.
-    const persisted = (await readProjectContextCache())[cacheKeyHash(cacheKey)];
+    const persisted = (await readProjectContextCache())[cacheKeyHash(stableKey ?? cacheKey)];
     if (persisted && Date.now() - persisted.cachedAt < PROJECT_CONTEXT_TTL_MS) {
       const restored = restoreFromCache(auth, persisted);
       projectContextResultCache.set(cacheKey, restored);
@@ -425,7 +500,23 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
   const resolveContext = async (): Promise<ProjectContextResult> => {
     const parts = parseRefreshParts(auth.refresh);
     if (parts.managedProjectId) {
-      return { auth, effectiveProjectId: parts.managedProjectId };
+      // The project is already settled, so there is nothing here to resolve. The
+      // same call is still the only thing that reports the plan, though, and
+      // returning early left every account looking like it had no plan at all.
+      // It runs once, then the plan is read from the cache like anything else.
+      const known: ProjectContextResult = { auth, effectiveProjectId: parts.managedProjectId };
+      const remembered = (await readProjectContextCache())[cacheKeyHash(stableKey ?? auth.refresh.trim())];
+      if (remembered?.subscription) return { ...known, subscription: remembered.subscription };
+
+      const payload = await loadManagedProject(accessToken, parts.projectId ?? parts.managedProjectId);
+      const subscription = readPaidTier(payload);
+      if (!subscription) return known;
+      await writeProjectContextCache(cacheKeyHash(stableKey ?? auth.refresh.trim()), {
+        cachedAt: Date.now(),
+        effectiveProjectId: parts.managedProjectId,
+        subscription,
+      });
+      return { ...known, subscription };
     }
 
     const fallbackProjectId = ANTIGRAVITY_DEFAULT_PROJECT_ID;
@@ -445,16 +536,22 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
     // Try to resolve a managed project from Antigravity if possible.
     const loadPayload = await loadManagedProject(accessToken, parts.projectId ?? fallbackProjectId);
     const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
+    // Read from the same response, so it costs no extra call. It is attached
+    // whichever way the project resolves below, including the fallbacks, since
+    // the plan does not depend on the project.
+    const subscription = readPaidTier(loadPayload);
+    const withPlan = async (result: ProjectContextResult): Promise<ProjectContextResult> =>
+      subscription ? { ...result, subscription } : result;
 
     if (resolvedManagedProjectId) {
-      return persistManagedProject(resolvedManagedProjectId);
+      return withPlan(await persistManagedProject(resolvedManagedProjectId));
     }
 
     // No managed project found - try to auto-provision one via onboarding.
     // This handles accounts that were added before managed project provisioning was required.
     const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
     log.debug("Auto-provisioning managed project", { tierId, projectId: parts.projectId });
-    
+
     const provisionedProjectId = await onboardManagedProject(
       accessToken,
       tierId,
@@ -463,7 +560,7 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
 
     if (provisionedProjectId) {
       log.debug("Successfully provisioned managed project", { provisionedProjectId });
-      return persistManagedProject(provisionedProjectId);
+      return withPlan(await persistManagedProject(provisionedProjectId));
     }
 
     log.warn("Failed to provision managed project - account may not work correctly", {
@@ -471,11 +568,11 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
     });
 
     if (parts.projectId) {
-      return { auth, effectiveProjectId: parts.projectId };
+      return withPlan({ auth, effectiveProjectId: parts.projectId });
     }
 
     // No project id present in auth; fall back to the hardcoded id for requests.
-    return { auth, effectiveProjectId: fallbackProjectId };
+    return withPlan({ auth, effectiveProjectId: fallbackProjectId });
   };
 
   if (!cacheKey) {
@@ -484,11 +581,19 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
 
   const promise = resolveContext()
     .then(async (result) => {
-      const nextKey = getCacheKey(result.auth) ?? cacheKey;
+      const nextKey = getStableCacheKey(result.auth) ?? cacheKey;
       projectContextPendingCache.delete(cacheKey);
       projectContextResultCache.set(nextKey, result);
       if (nextKey !== cacheKey) {
         projectContextResultCache.delete(cacheKey);
+      }
+
+      // Only remember a lookup that actually answered. Caching an outcome with
+      // neither a managed project nor a plan stores "we learned nothing" for a
+      // day, so a later fix to the request would keep being masked by the very
+      // cache meant to speed things up.
+      if (!result.subscription && !parseRefreshParts(result.auth.refresh).managedProjectId) {
+        return result;
       }
 
       // Persist the outcome under both keys: the lookup may have produced a
@@ -499,6 +604,7 @@ export async function ensureProjectContext(auth: OAuthAuthDetails): Promise<Proj
         await writeProjectContextCache(cacheKeyHash(key), {
           cachedAt: Date.now(),
           effectiveProjectId: result.effectiveProjectId,
+          ...(result.subscription ? { subscription: result.subscription } : {}),
           ...(parts.managedProjectId ? { managedProjectId: parts.managedProjectId } : {}),
           ...(parts.projectId ? { projectId: parts.projectId } : {}),
         });

@@ -28,6 +28,9 @@ const quotaGroupSchema = {
     remainingPercent: { type: "number" },
     resetTime: { type: "string" },
     modelCount: { type: "number" },
+    // Declared because the schema forbids extra properties: a field the handler
+    // sets but the schema does not name is stripped from the response.
+    windowMinutes: { type: "number" },
   },
   required: ["id", "label", "remainingPercent", "modelCount"],
   additionalProperties: false,
@@ -52,6 +55,7 @@ const accountSchema = {
     status: { type: "string", enum: ["ok", "disabled", "error"] },
     error: { type: "string" },
     enabled: { type: "boolean" },
+    subscription: { type: "object" },
     groups: { type: "array", items: quotaGroupSchema },
     geminiCli: { type: "array", items: geminiCliModelSchema },
     geminiCliError: { type: "string" },
@@ -93,17 +97,37 @@ export type AntigravityQuotaOutput = {
     status: "ok" | "disabled" | "error";
     error?: string;
     enabled: boolean;
+    subscription?: { id: string; name?: string };
     groups: Array<{
       id: string;
       label: string;
       remainingPercent: number;
       resetTime?: string;
       modelCount: number;
+      windowMinutes?: number;
     }>;
     geminiCli: Array<{ modelId: string; remainingPercent: number; resetTime?: string }>;
     geminiCliError?: string;
   }>;
 };
+
+/**
+ * How long an allowance still has to run, in minutes.
+ *
+ * The provider reports when a window refills, not how long it runs. That is
+ * still enough to name the window: a rolling five-hour window has at most five
+ * hours left, so a reset under six hours out is one, and anything past five days
+ * is the weekly window. The quota consumer uses this to label the row and to
+ * tell two windows of the same account apart.
+ */
+function windowMinutes(resetTime: string | undefined): number | undefined {
+  if (!resetTime) return undefined;
+  const at = Date.parse(resetTime);
+  if (!Number.isFinite(at)) return undefined;
+  const remainingMinutes = (at - Date.now()) / 60_000;
+  if (remainingMinutes <= 0) return undefined;
+  return Math.round(remainingMinutes);
+}
 
 function toPercent(fraction: number | undefined): number {
   if (typeof fraction !== "number" || !Number.isFinite(fraction)) return 0;
@@ -122,6 +146,9 @@ function toAccount(result: AccountQuotaResult): AntigravityQuotaOutput["accounts
       label: GROUP_LABELS[id] ?? id,
       remainingPercent: toPercent(summary.remainingFraction),
       ...(summary.resetTime ? { resetTime: summary.resetTime } : {}),
+      ...(windowMinutes(summary.resetTime) !== undefined
+        ? { windowMinutes: windowMinutes(summary.resetTime) as number }
+        : {}),
       modelCount: summary.modelCount,
     });
   }
@@ -138,6 +165,7 @@ function toAccount(result: AccountQuotaResult): AntigravityQuotaOutput["accounts
     status: result.status,
     ...(result.error ? { error: result.error } : {}),
     enabled: result.disabled !== true,
+    ...(result.subscription ? { subscription: result.subscription } : {}),
     groups,
     geminiCli,
     ...(result.geminiCliQuota?.error ? { geminiCliError: result.geminiCliQuota.error } : {}),

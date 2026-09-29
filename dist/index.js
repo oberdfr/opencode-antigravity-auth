@@ -1971,6 +1971,7 @@ function cacheKeyHash(refresh) {
   return createHash("sha256").update(refresh).digest("hex");
 }
 function restoreFromCache(auth, cached) {
+  const plan = cached.subscription;
   const parts = parseRefreshParts(auth.refresh);
   if (cached.managedProjectId && parts.refreshToken) {
     return {
@@ -1982,10 +1983,13 @@ function restoreFromCache(auth, cached) {
           managedProjectId: cached.managedProjectId
         })
       },
-      effectiveProjectId: cached.effectiveProjectId
+      effectiveProjectId: cached.effectiveProjectId,
+      // Carried back, or a warmed account would come back with its project but
+      // no plan, which reads as an account that is not a subscription.
+      ...plan ? { subscription: plan } : {}
     };
   }
-  return { auth, effectiveProjectId: cached.effectiveProjectId };
+  return { auth, effectiveProjectId: cached.effectiveProjectId, ...plan ? { subscription: plan } : {} };
 }
 async function readProjectContextCache() {
   try {
@@ -2018,12 +2022,18 @@ async function writeProjectContextCache(key, value) {
     }
   });
 }
+var LOAD_CODE_ASSIST_METADATA = {
+  ideType: "ANTIGRAVITY"
+};
 var CODE_ASSIST_METADATA = {
   ideType: "ANTIGRAVITY",
   platform: process.platform === "win32" ? "WINDOWS" : "MACOS",
   pluginType: "GEMINI"
 };
-function buildMetadata(projectId) {
+function buildMetadata() {
+  return { ideType: LOAD_CODE_ASSIST_METADATA.ideType };
+}
+function buildOnboardMetadata(projectId) {
   const metadata = {
     ideType: CODE_ASSIST_METADATA.ideType,
     platform: CODE_ASSIST_METADATA.platform,
@@ -2033,6 +2043,12 @@ function buildMetadata(projectId) {
     metadata.duetProject = projectId;
   }
   return metadata;
+}
+function readPaidTier(payload) {
+  const id = payload?.paidTier?.id;
+  if (!id) return void 0;
+  const name = payload?.paidTier?.name;
+  return { id, ...name ? { name } : {} };
 }
 function getDefaultTierId(allowedTiers) {
   if (!allowedTiers || allowedTiers.length === 0) {
@@ -2066,6 +2082,10 @@ function getCacheKey(auth) {
   const refresh = auth.refresh?.trim();
   return refresh ? refresh : void 0;
 }
+function getStableCacheKey(auth) {
+  const parts = parseRefreshParts(auth.refresh);
+  return parts.refreshToken || void 0;
+}
 function invalidateProjectContextCache(refresh) {
   if (!refresh) {
     projectContextPendingCache.clear();
@@ -2076,12 +2096,16 @@ function invalidateProjectContextCache(refresh) {
   projectContextResultCache.delete(refresh);
 }
 async function loadManagedProject(accessToken, projectId) {
-  const metadata = buildMetadata(projectId);
+  const metadata = buildMetadata();
   const requestBody = { metadata };
   const loadHeaders = {
     "Content-Type": "application/json",
     Authorization: `Bearer ${accessToken}`,
-    "User-Agent": "google-api-nodejs-client/9.15.1",
+    // The Antigravity User-Agent, not the Google API client's. Asked as the
+    // Google client the endpoint answers 200 with a body that has no
+    // currentTier and no paidTier in it, so the account's plan was never
+    // reported and the lookup looked like it had nothing to say.
+    "User-Agent": getAntigravityHeaders()["User-Agent"] ?? "antigravity/windows/amd64",
     "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
     "Client-Metadata": getAntigravityHeaders()["Client-Metadata"]
   };
@@ -2114,7 +2138,7 @@ async function loadManagedProject(accessToken, projectId) {
   return null;
 }
 async function onboardManagedProject(accessToken, tierId, projectId, attempts = 10, delayMs = 5e3) {
-  const metadata = buildMetadata(projectId);
+  const metadata = buildOnboardMetadata(projectId);
   const requestBody = {
     tierId,
     metadata
@@ -2160,6 +2184,7 @@ async function ensureProjectContext(auth) {
     return { auth, effectiveProjectId: "" };
   }
   const cacheKey = getCacheKey(auth);
+  const stableKey = getStableCacheKey(auth);
   if (cacheKey) {
     const cached = projectContextResultCache.get(cacheKey);
     if (cached) {
@@ -2169,7 +2194,7 @@ async function ensureProjectContext(auth) {
     if (pending) {
       return pending;
     }
-    const persisted = (await readProjectContextCache())[cacheKeyHash(cacheKey)];
+    const persisted = (await readProjectContextCache())[cacheKeyHash(stableKey ?? cacheKey)];
     if (persisted && Date.now() - persisted.cachedAt < PROJECT_CONTEXT_TTL_MS) {
       const restored = restoreFromCache(auth, persisted);
       projectContextResultCache.set(cacheKey, restored);
@@ -2179,7 +2204,18 @@ async function ensureProjectContext(auth) {
   const resolveContext = async () => {
     const parts = parseRefreshParts(auth.refresh);
     if (parts.managedProjectId) {
-      return { auth, effectiveProjectId: parts.managedProjectId };
+      const known = { auth, effectiveProjectId: parts.managedProjectId };
+      const remembered = (await readProjectContextCache())[cacheKeyHash(stableKey ?? auth.refresh.trim())];
+      if (remembered?.subscription) return { ...known, subscription: remembered.subscription };
+      const payload = await loadManagedProject(accessToken, parts.projectId ?? parts.managedProjectId);
+      const subscription2 = readPaidTier(payload);
+      if (!subscription2) return known;
+      await writeProjectContextCache(cacheKeyHash(stableKey ?? auth.refresh.trim()), {
+        cachedAt: Date.now(),
+        effectiveProjectId: parts.managedProjectId,
+        subscription: subscription2
+      });
+      return { ...known, subscription: subscription2 };
     }
     const fallbackProjectId = ANTIGRAVITY_DEFAULT_PROJECT_ID;
     const persistManagedProject = async (managedProjectId) => {
@@ -2195,8 +2231,10 @@ async function ensureProjectContext(auth) {
     };
     const loadPayload = await loadManagedProject(accessToken, parts.projectId ?? fallbackProjectId);
     const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
+    const subscription = readPaidTier(loadPayload);
+    const withPlan = async (result) => subscription ? { ...result, subscription } : result;
     if (resolvedManagedProjectId) {
-      return persistManagedProject(resolvedManagedProjectId);
+      return withPlan(await persistManagedProject(resolvedManagedProjectId));
     }
     const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
     log3.debug("Auto-provisioning managed project", { tierId, projectId: parts.projectId });
@@ -2207,31 +2245,35 @@ async function ensureProjectContext(auth) {
     );
     if (provisionedProjectId) {
       log3.debug("Successfully provisioned managed project", { provisionedProjectId });
-      return persistManagedProject(provisionedProjectId);
+      return withPlan(await persistManagedProject(provisionedProjectId));
     }
     log3.warn("Failed to provision managed project - account may not work correctly", {
       hasProjectId: !!parts.projectId
     });
     if (parts.projectId) {
-      return { auth, effectiveProjectId: parts.projectId };
+      return withPlan({ auth, effectiveProjectId: parts.projectId });
     }
-    return { auth, effectiveProjectId: fallbackProjectId };
+    return withPlan({ auth, effectiveProjectId: fallbackProjectId });
   };
   if (!cacheKey) {
     return resolveContext();
   }
   const promise = resolveContext().then(async (result) => {
-    const nextKey = getCacheKey(result.auth) ?? cacheKey;
+    const nextKey = getStableCacheKey(result.auth) ?? cacheKey;
     projectContextPendingCache.delete(cacheKey);
     projectContextResultCache.set(nextKey, result);
     if (nextKey !== cacheKey) {
       projectContextResultCache.delete(cacheKey);
+    }
+    if (!result.subscription && !parseRefreshParts(result.auth.refresh).managedProjectId) {
+      return result;
     }
     const parts = parseRefreshParts(result.auth.refresh);
     for (const key of /* @__PURE__ */ new Set([cacheKey, nextKey])) {
       await writeProjectContextCache(cacheKeyHash(key), {
         cachedAt: Date.now(),
         effectiveProjectId: result.effectiveProjectId,
+        ...result.subscription ? { subscription: result.subscription } : {},
         ...parts.managedProjectId ? { managedProjectId: parts.managedProjectId } : {},
         ...parts.projectId ? { projectId: parts.projectId } : {}
       });
@@ -9859,6 +9901,7 @@ async function checkAccountsQuota(accounts, client, providerId = ANTIGRAVITY_PRO
 async function checkAccountQuota(account, index, client, providerId) {
   {
     const disabled = account.enabled === false;
+    let subscription;
     let auth = buildAuthFromAccount(account);
     try {
       if (accessTokenExpired(auth)) {
@@ -9870,6 +9913,7 @@ async function checkAccountQuota(account, index, client, providerId) {
       }
       const projectContext = await ensureProjectContext(auth);
       auth = projectContext.auth;
+      subscription = projectContext.subscription;
       const updatedAccount = applyAccountUpdates(account, auth);
       let quotaResult;
       let geminiCliQuotaResult;
@@ -9901,7 +9945,8 @@ async function checkAccountQuota(account, index, client, providerId) {
         disabled,
         quota: quotaResult,
         geminiCliQuota: geminiCliQuotaResult,
-        updatedAccount
+        updatedAccount,
+        ...subscription ? { subscription } : {}
       };
     } catch (error) {
       logQuotaFetch("error", void 0, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
@@ -13153,7 +13198,10 @@ var quotaGroupSchema = {
     label: { type: "string" },
     remainingPercent: { type: "number" },
     resetTime: { type: "string" },
-    modelCount: { type: "number" }
+    modelCount: { type: "number" },
+    // Declared because the schema forbids extra properties: a field the handler
+    // sets but the schema does not name is stripped from the response.
+    windowMinutes: { type: "number" }
   },
   required: ["id", "label", "remainingPercent", "modelCount"],
   additionalProperties: false
@@ -13176,6 +13224,7 @@ var accountSchema = {
     status: { type: "string", enum: ["ok", "disabled", "error"] },
     error: { type: "string" },
     enabled: { type: "boolean" },
+    subscription: { type: "object" },
     groups: { type: "array", items: quotaGroupSchema },
     geminiCli: { type: "array", items: geminiCliModelSchema },
     geminiCliError: { type: "string" }
@@ -13206,6 +13255,14 @@ var AntigravityRpc = Rpc.define({
   },
   events: {}
 });
+function windowMinutes(resetTime) {
+  if (!resetTime) return void 0;
+  const at = Date.parse(resetTime);
+  if (!Number.isFinite(at)) return void 0;
+  const remainingMinutes = (at - Date.now()) / 6e4;
+  if (remainingMinutes <= 0) return void 0;
+  return Math.round(remainingMinutes);
+}
 function toPercent(fraction) {
   if (typeof fraction !== "number" || !Number.isFinite(fraction)) return 0;
   return Math.round(Math.min(Math.max(fraction, 0), 1) * 1e3) / 10;
@@ -13221,6 +13278,7 @@ function toAccount(result) {
       label: GROUP_LABELS[id] ?? id,
       remainingPercent: toPercent(summary.remainingFraction),
       ...summary.resetTime ? { resetTime: summary.resetTime } : {},
+      ...windowMinutes(summary.resetTime) !== void 0 ? { windowMinutes: windowMinutes(summary.resetTime) } : {},
       modelCount: summary.modelCount
     });
   }
@@ -13235,6 +13293,7 @@ function toAccount(result) {
     status: result.status,
     ...result.error ? { error: result.error } : {},
     enabled: result.disabled !== true,
+    ...result.subscription ? { subscription: result.subscription } : {},
     groups,
     geminiCli,
     ...result.geminiCliQuota?.error ? { geminiCliError: result.geminiCliQuota.error } : {}

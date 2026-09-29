@@ -229,6 +229,7 @@ export async function checkAccountsQuota(accounts, client, providerId = ANTIGRAV
 async function checkAccountQuota(account, index, client, providerId) {
     {
         const disabled = account.enabled === false;
+        let subscription;
         let auth = buildAuthFromAccount(account);
         try {
             if (accessTokenExpired(auth)) {
@@ -240,6 +241,7 @@ async function checkAccountQuota(account, index, client, providerId) {
             }
             const projectContext = await ensureProjectContext(auth);
             auth = projectContext.auth;
+            subscription = projectContext.subscription;
             const updatedAccount = applyAccountUpdates(account, auth);
             let quotaResult;
             let geminiCliQuotaResult;
@@ -280,6 +282,7 @@ async function checkAccountQuota(account, index, client, providerId) {
                 quota: quotaResult,
                 geminiCliQuota: geminiCliQuotaResult,
                 updatedAccount,
+                ...(subscription ? { subscription } : {}),
             };
         }
         catch (error) {

@@ -60,6 +60,8 @@ export interface AccountQuotaResult {
   quota?: QuotaSummary;
   geminiCliQuota?: GeminiCliQuotaSummary;
   updatedAccount?: AccountMetadataV3;
+  /** The account's plan, when project resolution reported one. */
+  subscription?: { id: string; name?: string };
 }
 
 interface FetchAvailableModelsResponse {
@@ -364,6 +366,7 @@ async function checkAccountQuota(
 ): Promise<AccountQuotaResult> {
   {
     const disabled = account.enabled === false;
+    let subscription: AccountQuotaResult["subscription"];
 
     let auth = buildAuthFromAccount(account);
 
@@ -378,6 +381,7 @@ async function checkAccountQuota(
 
       const projectContext = await ensureProjectContext(auth);
       auth = projectContext.auth;
+      subscription = projectContext.subscription;
       const updatedAccount = applyAccountUpdates(account, auth);
 
       let quotaResult: QuotaSummary;
@@ -423,6 +427,7 @@ async function checkAccountQuota(
         quota: quotaResult,
         geminiCliQuota: geminiCliQuotaResult,
         updatedAccount,
+        ...(subscription ? { subscription } : {}),
       };
     } catch (error) {
       logQuotaFetch("error", undefined, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
