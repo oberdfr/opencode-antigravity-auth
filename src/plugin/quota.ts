@@ -14,6 +14,14 @@ import type { AccountMetadataV3 } from "./storage";
 
 const FETCH_TIMEOUT_MS = 10000;
 
+/**
+ * How far out a reset still counts as the five-hour window.
+ *
+ * A rolling window has at most its own length left, so six hours is the widest
+ * reading that can still be one.
+ */
+const FIVE_HOUR_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 export type QuotaGroup = "claude" | "gemini-pro" | "gemini-flash";
 
 /**
@@ -236,15 +244,13 @@ async function fetchQuotaBuckets(
   };
 
   try {
-    const targets: Array<[string, string]> = [[ANTIGRAVITY_ENDPOINT_PROD, projectId]];
-    if (consumerProjectId && consumerProjectId !== projectId) {
-      targets.push([ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId]);
-    }
-
+    // The two hosts are always asked, even when they name the same project: they
+    // serve different pools, so skipping the weekly one because the project
+    // happens to match would drop the weekly allowance on exactly the accounts
+    // whose project has already resolved. Only a host already asked is skipped.
     const seen = new Set<string>();
-    const buckets: NonNullable<RetrieveUserQuotaResponse["buckets"]> = [];
-    for (const [host, project] of targets) {
-      for (const bucket of await ask(host, project)) {
+    const merge = (into: NonNullable<RetrieveUserQuotaResponse["buckets"]>) => {
+      for (const bucket of into) {
         if (!bucket.modelId) continue;
         // Keyed by both, because the same model on two windows is two allowances
         // and the same model twice on one window is one.
@@ -253,7 +259,26 @@ async function fetchQuotaBuckets(
         seen.add(key);
         buckets.push(bucket);
       }
+    };
+
+    const buckets: NonNullable<RetrieveUserQuotaResponse["buckets"]> = [];
+    merge(await ask(ANTIGRAVITY_ENDPOINT_PROD, projectId));
+
+    // Whether the account has a five-hour window is what decides the weekly one.
+    //
+    // A subscription account has both and the weekly is only on the autopush host,
+    // so it has to be asked for. A free account has no five-hour window, and what
+    // the production host reports for it already is the weekly allowance: the
+    // weekly pool on the other host is then a second, untouched one that never
+    // started counting down, and merging it in would show every family a third
+    // row that duplicates the one already there.
+    const hasFiveHourWindow = buckets.some(
+      (bucket) => bucket.resetTime && Date.parse(bucket.resetTime) - Date.now() <= FIVE_HOUR_WINDOW_MS,
+    );
+    if (consumerProjectId && hasFiveHourWindow) {
+      merge(await ask(ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId));
     }
+
     return { buckets };
   } catch {
     // Network error or timeout - return empty buckets

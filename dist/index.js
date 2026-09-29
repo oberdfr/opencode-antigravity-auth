@@ -9634,6 +9634,7 @@ async function showLocalDevToast(client, version) {
 
 // src/plugin/quota.ts
 var FETCH_TIMEOUT_MS2 = 1e4;
+var FIVE_HOUR_WINDOW_MS = 6 * 60 * 60 * 1e3;
 function buildAuthFromAccount(account) {
   return {
     type: "oauth",
@@ -9737,20 +9738,23 @@ async function fetchQuotaBuckets(accessToken, projectId, consumerProjectId) {
     return data.buckets ?? [];
   };
   try {
-    const targets = [[ANTIGRAVITY_ENDPOINT_PROD, projectId]];
-    if (consumerProjectId && consumerProjectId !== projectId) {
-      targets.push([ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId]);
-    }
     const seen = /* @__PURE__ */ new Set();
-    const buckets = [];
-    for (const [host, project] of targets) {
-      for (const bucket of await ask(host, project)) {
+    const merge = (into) => {
+      for (const bucket of into) {
         if (!bucket.modelId) continue;
         const key = `${bucket.modelId}@${bucket.resetTime ?? ""}`;
         if (seen.has(key)) continue;
         seen.add(key);
         buckets.push(bucket);
       }
+    };
+    const buckets = [];
+    merge(await ask(ANTIGRAVITY_ENDPOINT_PROD, projectId));
+    const hasFiveHourWindow = buckets.some(
+      (bucket) => bucket.resetTime && Date.parse(bucket.resetTime) - Date.now() <= FIVE_HOUR_WINDOW_MS
+    );
+    if (consumerProjectId && hasFiveHourWindow) {
+      merge(await ask(ANTIGRAVITY_ENDPOINT_AUTOPUSH, consumerProjectId));
     }
     return { buckets };
   } catch {
