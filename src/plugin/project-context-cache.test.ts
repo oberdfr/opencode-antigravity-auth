@@ -34,11 +34,22 @@ function cacheKeyOf(refresh: string): string {
   return createHash("sha256").update(refresh).digest("hex");
 }
 
-/** Stands in for loadCodeAssist: succeeds and reports a managed project. */
-function loadResponse(managedProjectId: string) {
+/**
+ * Stands in for loadCodeAssist: succeeds and reports a plan.
+ *
+ * It also names a project, which the plugin deliberately does not adopt. That
+ * project is what generation is sent to when it is adopted, and requests fail
+ * against it, so the tests pin the plan arriving and the project staying put.
+ */
+const IGNORED_PROJECT = "aicode-consumers";
+
+function loadResponse(paidTierId = "g1-pro-tier", name = "Google AI Pro") {
   return {
     ok: true,
-    json: async () => ({ cloudaicompanionProject: { id: managedProjectId } }),
+    json: async () => ({
+      cloudaicompanionProject: { id: IGNORED_PROJECT },
+      paidTier: { id: paidTierId, name },
+    }),
   };
 }
 
@@ -47,7 +58,7 @@ describe("project context disk cache", () => {
     configDir = await mkdtemp(join(tmpdir(), "opencode-project-cache-"));
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => loadResponse("managed-project-1")),
+      vi.fn(async () => loadResponse()),
     );
   });
 
@@ -56,20 +67,31 @@ describe("project context disk cache", () => {
     await rm(configDir, { recursive: true, force: true });
   });
 
-  it("resolves over the network the first time and writes a cache entry", async () => {
+  it("reads the plan over the network the first time and writes a cache entry", async () => {
     const project = await freshModule();
 
     const result = await project.ensureProjectContext(auth());
 
-    expect(result.effectiveProjectId).toBe("managed-project-1");
-    // The managed project is attached to the auth so callers can persist it.
-    expect(result.auth.refresh).toContain("managed-project-1");
+    expect(result.subscription).toEqual({ id: "g1-pro-tier", name: "Google AI Pro" });
     expect(await readFile(join(configDir, "antigravity-project-context.json"), "utf8")).toContain(
-      "managed-project-1",
+      "g1-pro-tier",
     );
   });
 
-  it("skips the network on a later run and returns the same project", async () => {
+  it("leaves the project alone even when the lookup names one", async () => {
+    // Adopting the looked-up project sends generation to "aicode-consumers",
+    // where every request comes back as an HTTP 400. The lookup is made for the
+    // plan; the project is not its to change.
+    const project = await freshModule();
+
+    const result = await project.ensureProjectContext(auth());
+
+    expect(result.effectiveProjectId).toBe("rising-fact-p41fc");
+    expect(result.effectiveProjectId).not.toBe(IGNORED_PROJECT);
+    expect(result.auth.refresh).not.toContain(IGNORED_PROJECT);
+  });
+
+  it("skips the network on a later run and still reports the plan", async () => {
     const first = await freshModule();
     await first.ensureProjectContext(auth());
 
@@ -81,8 +103,7 @@ describe("project context disk cache", () => {
 
     const result = await second.ensureProjectContext(auth());
 
-    expect(result.effectiveProjectId).toBe("managed-project-1");
-    expect(result.auth.refresh).toContain("managed-project-1");
+    expect(result.subscription).toEqual({ id: "g1-pro-tier", name: "Google AI Pro" });
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -103,7 +124,7 @@ describe("project context disk cache", () => {
     const project = await freshModule();
     const result = await project.ensureProjectContext(auth());
 
-    expect(result.effectiveProjectId).toBe("managed-project-1");
+    expect(result.effectiveProjectId).toBe("rising-fact-p41fc");
   });
 
   it("keeps every account's entry when they resolve concurrently", async () => {
@@ -144,7 +165,7 @@ describe("project context disk cache", () => {
     const result = await second.ensureProjectContext(auth());
 
     expect(fetchMock).toHaveBeenCalled();
-    expect(result.effectiveProjectId).toBe("managed-project-1");
+    expect(result.effectiveProjectId).toBe("rising-fact-p41fc");
   });
 
   it("keeps the remembered project when a token refresh invalidates the cache", async () => {

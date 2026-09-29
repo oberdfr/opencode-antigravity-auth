@@ -2033,50 +2033,11 @@ var CODE_ASSIST_METADATA = {
 function buildMetadata() {
   return { ideType: LOAD_CODE_ASSIST_METADATA.ideType };
 }
-function buildOnboardMetadata(projectId) {
-  const metadata = {
-    ideType: CODE_ASSIST_METADATA.ideType,
-    platform: CODE_ASSIST_METADATA.platform,
-    pluginType: CODE_ASSIST_METADATA.pluginType
-  };
-  if (projectId) {
-    metadata.duetProject = projectId;
-  }
-  return metadata;
-}
 function readPaidTier(payload) {
   const id = payload?.paidTier?.id;
   if (!id) return void 0;
   const name = payload?.paidTier?.name;
   return { id, ...name ? { name } : {} };
-}
-function getDefaultTierId(allowedTiers) {
-  if (!allowedTiers || allowedTiers.length === 0) {
-    return void 0;
-  }
-  for (const tier of allowedTiers) {
-    if (tier?.isDefault) {
-      return tier.id;
-    }
-  }
-  return allowedTiers[0]?.id;
-}
-function wait(ms) {
-  return new Promise(function(resolve) {
-    setTimeout(resolve, ms);
-  });
-}
-function extractManagedProjectId(payload) {
-  if (!payload) {
-    return void 0;
-  }
-  if (typeof payload.cloudaicompanionProject === "string") {
-    return payload.cloudaicompanionProject;
-  }
-  if (payload.cloudaicompanionProject && typeof payload.cloudaicompanionProject.id === "string") {
-    return payload.cloudaicompanionProject.id;
-  }
-  return void 0;
 }
 function getCacheKey(auth) {
   const refresh = auth.refresh?.trim();
@@ -2137,47 +2098,6 @@ async function loadManagedProject(accessToken, projectId) {
   }
   return null;
 }
-async function onboardManagedProject(accessToken, tierId, projectId, attempts = 10, delayMs = 5e3) {
-  const metadata = buildOnboardMetadata(projectId);
-  const requestBody = {
-    tierId,
-    metadata
-  };
-  for (const baseEndpoint of ANTIGRAVITY_ENDPOINT_FALLBACKS) {
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
-      try {
-        const response = await fetch(
-          `${baseEndpoint}/v1internal:onboardUser`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-              ...getAntigravityHeaders()
-            },
-            body: JSON.stringify(requestBody)
-          }
-        );
-        if (!response.ok) {
-          break;
-        }
-        const payload = await response.json();
-        const managedProjectId = payload.response?.cloudaicompanionProject?.id;
-        if (payload.done && managedProjectId) {
-          return managedProjectId;
-        }
-        if (payload.done && projectId) {
-          return projectId;
-        }
-      } catch (error) {
-        log3.debug("Failed to onboard managed project", { endpoint: baseEndpoint, error: String(error) });
-        break;
-      }
-      await wait(delayMs);
-    }
-  }
-  return void 0;
-}
 async function ensureProjectContext(auth) {
   const accessToken = auth.access;
   if (!accessToken) {
@@ -2217,43 +2137,10 @@ async function ensureProjectContext(auth) {
       });
       return { ...known, subscription: subscription2 };
     }
-    const fallbackProjectId = ANTIGRAVITY_DEFAULT_PROJECT_ID;
-    const persistManagedProject = async (managedProjectId) => {
-      const updatedAuth = {
-        ...auth,
-        refresh: formatRefreshParts({
-          refreshToken: parts.refreshToken,
-          projectId: parts.projectId,
-          managedProjectId
-        })
-      };
-      return { auth: updatedAuth, effectiveProjectId: managedProjectId };
-    };
-    const loadPayload = await loadManagedProject(accessToken, parts.projectId ?? fallbackProjectId);
-    const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
+    const fallbackProjectId = parts.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID;
+    const loadPayload = await loadManagedProject(accessToken, fallbackProjectId);
     const subscription = readPaidTier(loadPayload);
-    const withPlan = async (result) => subscription ? { ...result, subscription } : result;
-    if (resolvedManagedProjectId) {
-      return withPlan(await persistManagedProject(resolvedManagedProjectId));
-    }
-    const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
-    log3.debug("Auto-provisioning managed project", { tierId, projectId: parts.projectId });
-    const provisionedProjectId = await onboardManagedProject(
-      accessToken,
-      tierId,
-      parts.projectId
-    );
-    if (provisionedProjectId) {
-      log3.debug("Successfully provisioned managed project", { provisionedProjectId });
-      return withPlan(await persistManagedProject(provisionedProjectId));
-    }
-    log3.warn("Failed to provision managed project - account may not work correctly", {
-      hasProjectId: !!parts.projectId
-    });
-    if (parts.projectId) {
-      return withPlan({ auth, effectiveProjectId: parts.projectId });
-    }
-    return withPlan({ auth, effectiveProjectId: fallbackProjectId });
+    return subscription ? { auth, effectiveProjectId: fallbackProjectId, subscription } : { auth, effectiveProjectId: fallbackProjectId };
   };
   if (!cacheKey) {
     return resolveContext();
@@ -2265,9 +2152,7 @@ async function ensureProjectContext(auth) {
     if (nextKey !== cacheKey) {
       projectContextResultCache.delete(cacheKey);
     }
-    if (!result.subscription && !parseRefreshParts(result.auth.refresh).managedProjectId) {
-      return result;
-    }
+    if (!result.subscription) return result;
     const parts = parseRefreshParts(result.auth.refresh);
     for (const key of /* @__PURE__ */ new Set([cacheKey, nextKey])) {
       await writeProjectContextCache(cacheKeyHash(key), {
@@ -6996,6 +6881,7 @@ function prepareAntigravityRequest(input2, init, accessToken, projectId, endpoin
   }
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.delete("x-api-key");
+  headers.delete("x-goog-api-key");
   headers.delete("x-goog-user-project");
   const match = input2.match(/\/models\/([^:]+):(\w+)/);
   if (!match) {
@@ -13425,7 +13311,17 @@ async function registerOAuth(ctx, plugin, client) {
         if (!refreshed) throw new Error("Antigravity access-token refresh failed");
         return {
           ...credential,
-          refresh: refreshed.refresh,
+          // The token is rebuilt from its own parts, keeping the structure the
+          // credential already had. Writing back whatever the refresh returned
+          // appended a resolved project id to it, and since the credential is what
+          // every later session starts from, that stuck: the account then sent
+          // its requests to a project generation rejects, and every model failed
+          // with an HTTP 400. The refresh token itself is the first part and is
+          // what Google issued; nothing else belongs in this field.
+          refresh: formatRefreshParts({
+            ...parseRefreshParts(credential.refresh),
+            refreshToken: parseRefreshParts(refreshed.refresh).refreshToken
+          }),
           access: refreshed.access ?? "",
           expires: refreshed.expires ?? 0
         };

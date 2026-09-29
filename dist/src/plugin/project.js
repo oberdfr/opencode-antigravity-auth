@@ -417,46 +417,24 @@ export async function ensureProjectContext(auth) {
             });
             return { ...known, subscription };
         }
-        const fallbackProjectId = ANTIGRAVITY_DEFAULT_PROJECT_ID;
-        const persistManagedProject = async (managedProjectId) => {
-            const updatedAuth = {
-                ...auth,
-                refresh: formatRefreshParts({
-                    refreshToken: parts.refreshToken,
-                    projectId: parts.projectId,
-                    managedProjectId,
-                }),
-            };
-            return { auth: updatedAuth, effectiveProjectId: managedProjectId };
-        };
-        // Try to resolve a managed project from Antigravity if possible.
-        const loadPayload = await loadManagedProject(accessToken, parts.projectId ?? fallbackProjectId);
-        const resolvedManagedProjectId = extractManagedProjectId(loadPayload);
-        // Read from the same response, so it costs no extra call. It is attached
-        // whichever way the project resolves below, including the fallbacks, since
-        // the plan does not depend on the project.
+        // The lookup is made for the plan, not for a project.
+        //
+        // It used to be made to discover or provision a managed project, and the
+        // project it answered with was then used for requests. That is what this
+        // code did before the request was fixed to answer at all: with the request
+        // failing, every account fell back to the default project and requests
+        // worked. Once the request started answering, requests went to the project
+        // it names, "aicode-consumers", and every generation came back as an HTTP
+        // 400. So the answer is read for the plan and the project stays as it was.
+        //
+        // This also drops the auto-provisioning attempt, which spent up to a minute
+        // of retries per account on first read to produce a project nothing uses.
+        const fallbackProjectId = parts.projectId || ANTIGRAVITY_DEFAULT_PROJECT_ID;
+        const loadPayload = await loadManagedProject(accessToken, fallbackProjectId);
         const subscription = readPaidTier(loadPayload);
-        const withPlan = async (result) => subscription ? { ...result, subscription } : result;
-        if (resolvedManagedProjectId) {
-            return withPlan(await persistManagedProject(resolvedManagedProjectId));
-        }
-        // No managed project found - try to auto-provision one via onboarding.
-        // This handles accounts that were added before managed project provisioning was required.
-        const tierId = getDefaultTierId(loadPayload?.allowedTiers) ?? "FREE";
-        log.debug("Auto-provisioning managed project", { tierId, projectId: parts.projectId });
-        const provisionedProjectId = await onboardManagedProject(accessToken, tierId, parts.projectId);
-        if (provisionedProjectId) {
-            log.debug("Successfully provisioned managed project", { provisionedProjectId });
-            return withPlan(await persistManagedProject(provisionedProjectId));
-        }
-        log.warn("Failed to provision managed project - account may not work correctly", {
-            hasProjectId: !!parts.projectId,
-        });
-        if (parts.projectId) {
-            return withPlan({ auth, effectiveProjectId: parts.projectId });
-        }
-        // No project id present in auth; fall back to the hardcoded id for requests.
-        return withPlan({ auth, effectiveProjectId: fallbackProjectId });
+        return subscription
+            ? { auth, effectiveProjectId: fallbackProjectId, subscription }
+            : { auth, effectiveProjectId: fallbackProjectId };
     };
     if (!cacheKey) {
         return resolveContext();
@@ -469,13 +447,12 @@ export async function ensureProjectContext(auth) {
         if (nextKey !== cacheKey) {
             projectContextResultCache.delete(cacheKey);
         }
-        // Only remember a lookup that actually answered. Caching an outcome with
-        // neither a managed project nor a plan stores "we learned nothing" for a
-        // day, so a later fix to the request would keep being masked by the very
-        // cache meant to speed things up.
-        if (!result.subscription && !parseRefreshParts(result.auth.refresh).managedProjectId) {
+        // Only a plan is worth remembering. The project no longer comes from this
+        // lookup, so an entry without a plan holds nothing that a later fix to the
+        // request would not change, and caching it would keep the cache from
+        // picking up that fix for a whole TTL.
+        if (!result.subscription)
             return result;
-        }
         // Persist the outcome under both keys: the lookup may have produced a
         // managed project, which rewrites the refresh token, so the next process
         // would otherwise look the account up under a different key.

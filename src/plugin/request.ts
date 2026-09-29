@@ -793,6 +793,12 @@ export function prepareAntigravityRequest(
 
   headers.set("Authorization", `Bearer ${accessToken}`);
   headers.delete("x-api-key");
+  // The Google SDK carries its API key in this header, and it is still on the
+  // request when the provider has no key configured. Google answers an
+  // Antigravity OAuth request that carries it with "API key not valid", which
+  // reads like a credential problem rather than a stale header, so it has to go
+  // alongside x-api-key.
+  headers.delete("x-goog-api-key");
   // Strip x-goog-user-project header to prevent 403 auth/license conflicts.
   // This header is added by OpenCode/AI SDK and can force project-level checks
   // that are not required for Antigravity/Gemini CLI OAuth requests.

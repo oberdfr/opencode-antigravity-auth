@@ -127,7 +127,17 @@ async function registerOAuth(ctx: Context, plugin: PluginResult, client: PluginC
         if (!refreshed) throw new Error("Antigravity access-token refresh failed");
         return {
           ...credential,
-          refresh: refreshed.refresh,
+          // The token is rebuilt from its own parts, keeping the structure the
+          // credential already had. Writing back whatever the refresh returned
+          // appended a resolved project id to it, and since the credential is what
+          // every later session starts from, that stuck: the account then sent
+          // its requests to a project generation rejects, and every model failed
+          // with an HTTP 400. The refresh token itself is the first part and is
+          // what Google issued; nothing else belongs in this field.
+          refresh: formatRefreshParts({
+            ...parseRefreshParts(credential.refresh),
+            refreshToken: parseRefreshParts(refreshed.refresh).refreshToken,
+          }),
           access: refreshed.access ?? "",
           expires: refreshed.expires ?? 0,
         };
