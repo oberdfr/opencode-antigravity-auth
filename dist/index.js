@@ -9703,20 +9703,29 @@ async function fetchGeminiCliQuota(accessToken, projectId) {
   const arch = process.arch || "arm64";
   const geminiCliUserAgent = `GeminiCLI/1.0.0/gemini-2.5-pro (${platform}; ${arch})`;
   const body = projectId ? { project: projectId } : {};
-  try {
+  const ask = async (userAgent, headers) => {
     const response = await fetchWithTimeout2(`${endpoint}/v1internal:retrieveUserQuota`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${accessToken}`,
         "Content-Type": "application/json",
-        "User-Agent": geminiCliUserAgent
+        "User-Agent": userAgent,
+        ...headers
       },
       body: JSON.stringify(body)
     });
-    if (response.ok) {
-      const data = await response.json();
-      return data;
-    }
+    if (!response.ok) return void 0;
+    return await response.json();
+  };
+  try {
+    const antigravityHeaders = getAntigravityHeaders();
+    const asAntigravity = await ask(antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64", {
+      "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
+      "Client-Metadata": antigravityHeaders["Client-Metadata"]
+    });
+    if (asAntigravity) return asAntigravity;
+    const asCli = await ask(geminiCliUserAgent);
+    if (asCli) return asCli;
     return { buckets: [] };
   } catch {
     return { buckets: [] };

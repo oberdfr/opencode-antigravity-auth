@@ -133,20 +133,39 @@ async function fetchGeminiCliQuota(accessToken, projectId) {
     const arch = process.arch || "arm64";
     const geminiCliUserAgent = `GeminiCLI/1.0.0/gemini-2.5-pro (${platform}; ${arch})`;
     const body = projectId ? { project: projectId } : {};
-    try {
+    const ask = async (userAgent, headers) => {
         const response = await fetchWithTimeout(`${endpoint}/v1internal:retrieveUserQuota`, {
             method: "POST",
             headers: {
                 Authorization: `Bearer ${accessToken}`,
                 "Content-Type": "application/json",
-                "User-Agent": geminiCliUserAgent,
+                "User-Agent": userAgent,
+                ...headers,
             },
             body: JSON.stringify(body),
         });
-        if (response.ok) {
-            const data = (await response.json());
-            return data;
-        }
+        if (!response.ok)
+            return undefined;
+        return (await response.json());
+    };
+    try {
+        // Asked as Antigravity first. Asked as the Gemini CLI this same call answers
+        // 403 SUBSCRIPTION_REQUIRED, which reads like the account has no CLI quota at
+        // all, so the whole bucket set was being thrown away. Asked as Antigravity it
+        // answers 200 with every model's remaining allowance and its own reset, and
+        // the accounts that answer with more than one reset are the ones with more
+        // than one window. The CLI identity is kept as a fallback for accounts that
+        // only answer to it.
+        const antigravityHeaders = getAntigravityHeaders();
+        const asAntigravity = await ask(antigravityHeaders["User-Agent"] ?? "antigravity/windows/amd64", {
+            "X-Goog-Api-Client": antigravityHeaders["X-Goog-Api-Client"] ?? "",
+            "Client-Metadata": antigravityHeaders["Client-Metadata"],
+        });
+        if (asAntigravity)
+            return asAntigravity;
+        const asCli = await ask(geminiCliUserAgent);
+        if (asCli)
+            return asCli;
         // Non-OK response - return empty buckets
         return { buckets: [] };
     }
