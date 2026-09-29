@@ -6,8 +6,11 @@ const { createLegacyPlugin } = vi.hoisted(() => ({
 }));
 
 vi.mock("../plugin", () => ({ createAntigravityPlugin: createLegacyPlugin }));
+// The account file is the last fallback for credentials. Reading the real one
+// would make these tests depend on the machine they run on.
+vi.mock("./storage", () => ({ loadAccounts: vi.fn(async () => null) }));
 
-import { AntigravityV2Plugin } from "./v2";
+import { AntigravityV2Plugin, resolveAntigravityCredential } from "./v2";
 
 describe("Antigravity V2 plugin setup", () => {
   let cleanup: (() => void | Promise<void>) | undefined;
@@ -51,9 +54,10 @@ describe("Antigravity V2 plugin setup", () => {
       callback({ method: { update: methodUpdate } });
       return { dispose: async () => undefined };
     };
+    const providerGet = vi.fn(() => undefined);
     const providerTransform = async (callback: (editor: unknown) => void) => {
       callback({
-        get: () => undefined,
+        get: providerGet,
         add: providerAdd,
         models: { set: modelSet },
       });
@@ -91,7 +95,7 @@ describe("Antigravity V2 plugin setup", () => {
       refresh: unknown;
     };
     expect(oauthRegistration).toMatchObject({
-      integrationID: "google",
+      integrationID: "google-antigravity",
       method: { id: "antigravity", type: "oauth", label: "Google OAuth (Antigravity)" },
     });
     expect(oauthRegistration.refresh).toBeTypeOf("function");
@@ -107,13 +111,17 @@ describe("Antigravity V2 plugin setup", () => {
 
     expect(providerAdd).toHaveBeenCalledOnce();
     const provider = providerAdd.mock.calls[0]?.[0] as { info: { id: string }; models: Array<{ id: string }> };
-    expect(provider.info.id).toBe("google");
+    expect(provider.info.id).toBe("google-antigravity");
     expect(provider.models.some((model) => model.id === "antigravity-gemini-3.8-flash")).toBe(true);
     expect(modelSet).not.toHaveBeenCalled();
+    // The built-in google provider belongs to OpenCode and authenticates with an
+    // API key. Merging into it is what made two identical models show up and
+    // what made the catalog ones fail with an invalid API key.
+    expect(providerGet.mock.calls.flat()).not.toContain("google");
 
     expect(sessionHook).toHaveBeenCalledOnce();
     expect(sessionHook.mock.calls[0]?.[0]).toBe("http.request");
-    expect(sessionHook.mock.calls[0]?.[2]).toEqual({ providerID: "google" });
+    expect(sessionHook.mock.calls[0]?.[2]).toEqual({ providerID: "google-antigravity" });
     const requestHook = sessionHook.mock.calls[0]?.[1] as (event: {
       model: { id: string };
       request: Request;
@@ -148,5 +156,58 @@ describe("Antigravity V2 plugin setup", () => {
     ];
     expect(rpcDefinition.id).toBe("antigravity");
     expect(typeof rpcHandlers.quota).toBe("function");
+  });
+
+  it("finds a credential filed under the id this plugin had before the rename", async () => {
+    // Login writes the credential and OpenCode's auth flow owns that, so a
+    // connection made before the rename is still filed under "google". Reading it
+    // there is what avoids making the user log in again.
+    const connection = { id: "conn", integrationID: "google" };
+    const active = vi.fn(async (integrationID: string) =>
+      integrationID === "google" ? connection : undefined,
+    );
+    const credential = {
+      type: "oauth" as const,
+      methodID: "antigravity",
+      refresh: "refresh-from-old-id",
+      access: "access-token",
+      expires: 1,
+    };
+    const resolve = vi.fn(async (target: unknown) => (target === connection ? credential : undefined));
+
+    const found = await resolveAntigravityCredential({
+      integration: { connection: { active, resolve } },
+    } as unknown as Context);
+
+    expect(found).toMatchObject({ refresh: "refresh-from-old-id" });
+    // The new id is tried first, so a fresh login is preferred once there is one.
+    expect(active.mock.calls[0]?.[0]).toBe("google-antigravity");
+  });
+
+  it("prefers the new integration id when both hold a credential", async () => {
+    const fresh = { id: "new", integrationID: "google-antigravity" };
+    const active = vi.fn(async (integrationID: string) => (integrationID === "google-antigravity" ? fresh : undefined));
+    const resolve = vi.fn(async () => ({ type: "oauth" as const, methodID: "antigravity", refresh: "new-refresh" }));
+
+    const found = await resolveAntigravityCredential({
+      integration: { connection: { active, resolve } },
+    } as unknown as Context);
+
+    expect(found).toMatchObject({ refresh: "new-refresh" });
+    expect(resolve).toHaveBeenCalledExactlyOnceWith(fresh);
+  });
+
+  it("ignores a credential on the old id that is not an Antigravity login", async () => {
+    // The built-in google provider's own credential must not be mistaken for an
+    // Antigravity one, or the plugin would send an API key where OAuth is needed.
+    const connection = { id: "conn", integrationID: "google" };
+    const active = vi.fn(async (integrationID: string) => (integrationID === "google" ? connection : undefined));
+    const resolve = vi.fn(async () => ({ type: "api" as const, key: "sk-something" }));
+
+    const found = await resolveAntigravityCredential({
+      integration: { connection: { active, resolve } },
+    } as unknown as Context);
+
+    expect(found).toBeUndefined();
   });
 });

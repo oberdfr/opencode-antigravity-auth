@@ -39,7 +39,7 @@ const DEFAULT_MODALITIES: ModelModalities = {
 
 export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
   "antigravity-gemini-3-pro": {
-    name: "Gemini 3 Pro (Antigravity)",
+    name: "Gemini 3 Pro",
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -48,7 +48,7 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-gemini-3.1-pro": {
-    name: "Gemini 3.1 Pro (Antigravity)",
+    name: "Gemini 3.1 Pro",
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -57,7 +57,7 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-gemini-3.8-flash": {
-    name: "Gemini 3.8 Flash (Antigravity)",
+    name: "Gemini 3.8 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -67,7 +67,7 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-gemini-3.7-flash": {
-    name: "Gemini 3.7 Flash (Antigravity)",
+    name: "Gemini 3.7 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -77,7 +77,7 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-gemini-3.6-flash": {
-    name: "Gemini 3.6 Flash (Antigravity)",
+    name: "Gemini 3.6 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -87,7 +87,7 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-gemini-3-flash": {
-    name: "Gemini 3 Flash (Antigravity)",
+    name: "Gemini 3 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -98,12 +98,12 @@ export const OPENCODE_MODEL_DEFINITIONS: OpencodeModelDefinitions = {
     },
   },
   "antigravity-claude-sonnet-4-6": {
-    name: "Claude Sonnet 4.6 (Antigravity)",
+    name: "Claude Sonnet 4.6",
     limit: { context: 200000, output: 64000 },
     modalities: DEFAULT_MODALITIES,
   },
   "antigravity-claude-opus-4-6-thinking": {
-    name: "Claude Opus 4.6 Thinking (Antigravity)",
+    name: "Claude Opus 4.6 Thinking",
     limit: { context: 200000, output: 64000 },
     modalities: DEFAULT_MODALITIES,
     variants: {

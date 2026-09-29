@@ -149,8 +149,26 @@ export type HeaderStyle = "antigravity" | "gemini-cli";
 
 /**
  * Provider identifier shared between the plugin loader and credential store.
+ *
+ * This is deliberately not "google". OpenCode ships its own built-in "google"
+ * provider, which authenticates with an API key, and sharing the id merged the
+ * two: the Antigravity models were appended to the API-key catalog, so the
+ * picker showed a model twice, and picking the catalog one failed with an
+ * invalid API key because the only credential on "google" was this plugin's
+ * OAuth. A separate id keeps the API-key catalog and the OAuth models apart, and
+ * lets each authenticate the way it actually does.
  */
-export const ANTIGRAVITY_PROVIDER_ID = "google";
+export const ANTIGRAVITY_PROVIDER_ID = "google-antigravity";
+
+/**
+ * The id this plugin used before it had its own, kept so an existing OAuth
+ * connection is still found after the rename.
+ *
+ * Credentials are written by OpenCode's own auth flow and this plugin has no way
+ * to move them, so reads fall back to the old id. Connecting again from
+ * /connect stores the credential under the new id and this becomes unused.
+ */
+export const LEGACY_ANTIGRAVITY_PROVIDER_ID = "google";
 
 // ============================================================================
 // TOOL HALLUCINATION PREVENTION (Ported from LLM-API-Key-Proxy)

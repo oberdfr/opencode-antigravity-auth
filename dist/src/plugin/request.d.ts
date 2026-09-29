@@ -27,6 +27,11 @@ export declare function getPluginSessionId(): string;
 declare function generateSyntheticProjectId(): string;
 /**
  * Detects requests headed to the Google Generative Language API so we can intercept them.
+ *
+ * A `string` guard, and deliberately so: the rest of the request path here is
+ * written against a URL string, and the predicate narrows the input to one. The
+ * V2 proxy therefore hands the legacy engine a URL and an init rather than a
+ * `Request`, which is the shape this was written for.
  */
 export declare function isGenerativeLanguageRequest(input: RequestInfo): input is string;
 /**

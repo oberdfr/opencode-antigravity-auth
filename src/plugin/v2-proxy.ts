@@ -106,18 +106,30 @@ async function handleRequest(
   incoming.once("aborted", () => controller.abort(new Error("OpenCode request was aborted")));
   const method = incoming.method ?? "POST";
   const hasBody = method !== "GET" && method !== "HEAD";
-  const init: RequestInit & { duplex?: "half" } = {
+  const init: RequestInit = {
     method,
     headers,
     signal: controller.signal,
   };
   if (hasBody) {
-    init.body = Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
-    init.duplex = "half";
+    // Buffered into a string rather than streamed through. The legacy engine
+    // parses and re-serialises the payload, and only does so when the body is a
+    // string; handed a stream it skipped the whole transformation and Google
+    // rejected the unwrapped body with "Unknown name contents". These payloads
+    // are prompt sized, so buffering them costs little.
+    const chunks: Buffer[] = [];
+    for await (const chunk of incoming) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    init.body = Buffer.concat(chunks).toString("utf8");
   }
 
-  const request = new Request(targetURL, init);
-  const response = await (await getFetch())(request);
+  // The legacy engine is written against a URL string plus an init, which is what
+  // the V1 loader always handed it, and it decides whether to apply the
+  // Antigravity rewrite by looking for that string. Handing it a `Request`
+  // instead meant the check failed, the rewrite was skipped, and the request
+  // went to Google with no credentials and came back as a permission error.
+  const response = await (await getFetch())(targetURL.toString(), init);
   const responseHeaders: Record<string, string> = {};
   response.headers.forEach((value, name) => {
     responseHeaders[name] = value;

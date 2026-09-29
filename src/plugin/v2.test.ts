@@ -56,7 +56,7 @@ describe("V2 model adapter", () => {
     expect(model).toMatchObject({
       id,
       providerID: "google",
-      name: "Gemini 3.8 Flash (Antigravity)",
+      name: "Gemini 3.8 Flash",
       limit: { context: 1048576, output: 65536 },
       capabilities: {
         tools: true,

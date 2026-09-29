@@ -89,6 +89,13 @@ describe("request.ts", () => {
       expect(isGenerativeLanguageRequest({} as any)).toBe(false);
       expect(isGenerativeLanguageRequest(new Request("https://example.com"))).toBe(false);
     });
+
+    it("does not match a Request even for a Google URL", () => {
+      // Documented rather than fixed here: this guard narrows to a string and
+      // the rest of the request path is written against one, so the caller that
+      // has a Request is the V2 proxy, and it converts before calling in.
+      expect(isGenerativeLanguageRequest(new Request("https://generativelanguage.googleapis.com/v1/models"))).toBe(false);
+    });
   });
 
   describe("buildSignatureSessionKey", () => {

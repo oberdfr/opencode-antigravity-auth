@@ -1,6 +1,6 @@
 import { Plugin, Provider } from "@opencode/plugin";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import { ANTIGRAVITY_PROVIDER_ID } from "../constants";
+import { ANTIGRAVITY_PROVIDER_ID, LEGACY_ANTIGRAVITY_PROVIDER_ID } from "../constants";
 import { executeSearch } from "./search";
 import { accessTokenExpired, formatRefreshParts, isOAuthAuth, parseRefreshParts } from "./auth";
 import { refreshAccessToken } from "./token";
@@ -145,6 +145,9 @@ async function registerModels(ctx: Context): Promise<void> {
   const models = Object.entries(OPENCODE_MODEL_DEFINITIONS).map(([id, definition]) => toV2Model(providerID, id, definition));
 
   await ctx.provider.transform((editor) => {
+    // The provider is this plugin's own, so its models are added rather than
+    // merged into another provider's catalog. The merge below only ever runs on a
+    // reload of this same provider, where the same model ids are re-registered.
     const existing = editor.get(ANTIGRAVITY_PROVIDER_ID);
     if (existing) {
       const inventory = new Map(existing.models);
@@ -156,7 +159,7 @@ async function registerModels(ctx: Context): Promise<void> {
     editor.add({
       info: {
         ...Provider.Info.empty(providerID),
-        name: "Google",
+        name: "Google Antigravity",
         activation: "enabled",
         package: "@opencode/ai/providers/google",
       },
@@ -165,20 +168,36 @@ async function registerModels(ctx: Context): Promise<void> {
   });
 }
 
+/**
+ * Resolves the Antigravity OAuth credential, wherever it happens to live.
+ *
+ * The integration used to be registered under OpenCode's built-in "google" id,
+ * and the credential that login produced is still stored there. Credentials are
+ * written by OpenCode's auth flow rather than by this plugin, so the old id is
+ * still read as a fallback; that is what keeps an existing login working
+ * instead of demanding it be redone.
+ */
+export async function resolveAntigravityCredential(ctx: Context) {
+  for (const integrationID of [ANTIGRAVITY_PROVIDER_ID, LEGACY_ANTIGRAVITY_PROVIDER_ID]) {
+    const connection = await ctx.integration.connection.active(integrationID);
+    if (!connection) continue;
+    const credential = await ctx.integration.connection.resolve(connection);
+    if (credential?.type === "oauth" && credential.methodID === OAUTH_METHOD_ID) return credential;
+  }
+  return undefined;
+}
+
 async function createLegacyFetch(ctx: Context, plugin: PluginResult, client: PluginClient): Promise<LegacyFetch> {
   const loader = plugin.auth.loader;
   const getAuth = async () => {
-    const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
-    if (connection) {
-      const credential = await ctx.integration.connection.resolve(connection);
-      if (credential?.type === "oauth" && credential.methodID === OAUTH_METHOD_ID) {
-        return {
-          type: "oauth" as const,
-          refresh: credential.refresh,
-          access: credential.access,
-          expires: credential.expires,
-        };
-      }
+    const credential = await resolveAntigravityCredential(ctx);
+    if (credential) {
+      return {
+        type: "oauth" as const,
+        refresh: credential.refresh,
+        access: credential.access,
+        expires: credential.expires,
+      };
     }
 
     const savedAccounts = await loadAccounts();
@@ -227,9 +246,8 @@ async function registerSearchTool(ctx: Context, client: PluginClient): Promise<v
       },
       execute: async (input, context) => {
         const args = input as { query: string; urls?: string[]; thinking?: boolean };
-        const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
-        const credential = connection ? await ctx.integration.connection.resolve(connection) : undefined;
-        if (!credential || credential.type !== "oauth" || credential.methodID !== OAUTH_METHOD_ID) {
+        const credential = await resolveAntigravityCredential(ctx);
+        if (!credential) {
           return { content: "Not connected to Antigravity. Use /connect and choose Google OAuth (Antigravity)." };
         }
 

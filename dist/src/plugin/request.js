@@ -538,6 +538,11 @@ function generateSyntheticProjectId() {
 const STREAM_ACTION = "streamGenerateContent";
 /**
  * Detects requests headed to the Google Generative Language API so we can intercept them.
+ *
+ * A `string` guard, and deliberately so: the rest of the request path here is
+ * written against a URL string, and the predicate narrows the input to one. The
+ * V2 proxy therefore hands the legacy engine a URL and an init rather than a
+ * `Request`, which is the shape this was written for.
  */
 export function isGenerativeLanguageRequest(input) {
     return typeof input === "string" && input.includes("generativelanguage.googleapis.com");

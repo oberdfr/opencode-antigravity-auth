@@ -90,7 +90,8 @@ function getRandomizedHeaders(style, model) {
     "Client-Metadata": `{"ideType":"ANTIGRAVITY","platform":"${metadataPlatform}","pluginType":"GEMINI"}`
   };
 }
-var ANTIGRAVITY_PROVIDER_ID = "google";
+var ANTIGRAVITY_PROVIDER_ID = "google-antigravity";
+var LEGACY_ANTIGRAVITY_PROVIDER_ID = "google";
 var CLAUDE_TOOL_SYSTEM_INSTRUCTION = `CRITICAL TOOL USAGE INSTRUCTIONS:
 You are operating in a custom environment where tool definitions differ from your training data.
 You MUST follow these rules strictly:
@@ -1655,7 +1656,7 @@ var DEFAULT_MODALITIES = {
 };
 var OPENCODE_MODEL_DEFINITIONS = {
   "antigravity-gemini-3-pro": {
-    name: "Gemini 3 Pro (Antigravity)",
+    name: "Gemini 3 Pro",
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1664,7 +1665,7 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-gemini-3.1-pro": {
-    name: "Gemini 3.1 Pro (Antigravity)",
+    name: "Gemini 3.1 Pro",
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1673,7 +1674,7 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-gemini-3.8-flash": {
-    name: "Gemini 3.8 Flash (Antigravity)",
+    name: "Gemini 3.8 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1683,7 +1684,7 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-gemini-3.7-flash": {
-    name: "Gemini 3.7 Flash (Antigravity)",
+    name: "Gemini 3.7 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1693,7 +1694,7 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-gemini-3.6-flash": {
-    name: "Gemini 3.6 Flash (Antigravity)",
+    name: "Gemini 3.6 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1703,7 +1704,7 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-gemini-3-flash": {
-    name: "Gemini 3 Flash (Antigravity)",
+    name: "Gemini 3 Flash",
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -1714,12 +1715,12 @@ var OPENCODE_MODEL_DEFINITIONS = {
     }
   },
   "antigravity-claude-sonnet-4-6": {
-    name: "Claude Sonnet 4.6 (Antigravity)",
+    name: "Claude Sonnet 4.6",
     limit: { context: 2e5, output: 64e3 },
     modalities: DEFAULT_MODALITIES
   },
   "antigravity-claude-opus-4-6-thinking": {
-    name: "Claude Opus 4.6 Thinking (Antigravity)",
+    name: "Claude Opus 4.6 Thinking",
     limit: { context: 2e5, output: 64e3 },
     modalities: DEFAULT_MODALITIES,
     variants: {
@@ -13070,11 +13071,13 @@ async function handleRequest(incoming, outgoing, expectedToken, getFetch) {
     signal: controller.signal
   };
   if (hasBody) {
-    init.body = Readable.toWeb(incoming);
-    init.duplex = "half";
+    const chunks = [];
+    for await (const chunk of incoming) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    init.body = Buffer.concat(chunks).toString("utf8");
   }
-  const request = new Request(targetURL, init);
-  const response = await (await getFetch())(request);
+  const response = await (await getFetch())(targetURL.toString(), init);
   const responseHeaders = {};
   response.headers.forEach((value, name) => {
     responseHeaders[name] = value;
@@ -13389,7 +13392,7 @@ async function registerModels(ctx) {
     editor.add({
       info: {
         ...Provider2.Info.empty(providerID),
-        name: "Google",
+        name: "Google Antigravity",
         activation: "enabled",
         package: "@opencode/ai/providers/google"
       },
@@ -13397,20 +13400,26 @@ async function registerModels(ctx) {
     });
   });
 }
+async function resolveAntigravityCredential(ctx) {
+  for (const integrationID of [ANTIGRAVITY_PROVIDER_ID, LEGACY_ANTIGRAVITY_PROVIDER_ID]) {
+    const connection = await ctx.integration.connection.active(integrationID);
+    if (!connection) continue;
+    const credential = await ctx.integration.connection.resolve(connection);
+    if (credential?.type === "oauth" && credential.methodID === OAUTH_METHOD_ID2) return credential;
+  }
+  return void 0;
+}
 async function createLegacyFetch(ctx, plugin, client) {
   const loader = plugin.auth.loader;
   const getAuth = async () => {
-    const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
-    if (connection) {
-      const credential = await ctx.integration.connection.resolve(connection);
-      if (credential?.type === "oauth" && credential.methodID === OAUTH_METHOD_ID2) {
-        return {
-          type: "oauth",
-          refresh: credential.refresh,
-          access: credential.access,
-          expires: credential.expires
-        };
-      }
+    const credential = await resolveAntigravityCredential(ctx);
+    if (credential) {
+      return {
+        type: "oauth",
+        refresh: credential.refresh,
+        access: credential.access,
+        expires: credential.expires
+      };
     }
     const savedAccounts = await loadAccounts();
     const account = savedAccounts?.accounts[savedAccounts.activeIndex] ?? savedAccounts?.accounts[0];
@@ -13454,9 +13463,8 @@ async function registerSearchTool(ctx, client) {
       },
       execute: async (input2, context) => {
         const args = input2;
-        const connection = await ctx.integration.connection.active(ANTIGRAVITY_PROVIDER_ID);
-        const credential = connection ? await ctx.integration.connection.resolve(connection) : void 0;
-        if (!credential || credential.type !== "oauth" || credential.methodID !== OAUTH_METHOD_ID2) {
+        const credential = await resolveAntigravityCredential(ctx);
+        if (!credential) {
           return { content: "Not connected to Antigravity. Use /connect and choose Google OAuth (Antigravity)." };
         }
         let auth = {

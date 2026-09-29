@@ -113,7 +113,7 @@ describe("antigravity.quota RPC handler", () => {
     expect(checkAccountsQuota).toHaveBeenCalledWith(
       [{ refreshToken: "r" }],
       client,
-      "google",
+      "google-antigravity",
     );
   });
 });
