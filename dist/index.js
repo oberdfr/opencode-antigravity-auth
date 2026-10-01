@@ -5929,7 +5929,8 @@ function resolveModelWithTier(requestedModel, options = {}) {
   }
   const budgetFamily = getBudgetFamily(resolvedModel);
   const budgets = THINKING_TIER_BUDGETS[budgetFamily];
-  const thinkingBudget = budgets[tier];
+  const budgetTier = tier === "minimal" ? "low" : tier;
+  const thinkingBudget = budgetTier ? budgets[budgetTier] : void 0;
   return {
     actualModel: resolvedModel,
     thinkingBudget,
@@ -9864,6 +9865,12 @@ async function showLocalDevToast(client, version) {
   logAutoUpdate(`Local dev toast shown: v${version}`);
 }
 
+// src/plugin/stall.ts
+function isSelectionStalled(stalledOn, accountIndex, shouldSwitch) {
+  if (!shouldSwitch) return false;
+  return stalledOn === accountIndex;
+}
+
 // src/plugin/quota.ts
 var FETCH_TIMEOUT_MS2 = 1e4;
 var FIVE_HOUR_WINDOW_MS = 6 * 60 * 60 * 1e3;
@@ -11650,6 +11657,7 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
               if (family !== "gemini") return false;
               return accountManager.hasOtherAccountWithAntigravityAvailable(currentAccount.index, family, model);
             };
+            let stalledOn;
             while (true) {
               checkAborted();
               guardIterations++;
@@ -12009,6 +12017,15 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
                 } else {
                   shouldSwitchAccount = true;
                 }
+              }
+              if (shouldSwitchAccount) {
+                if (isSelectionStalled(stalledOn, account.index, true)) {
+                  const label = account.email || `Account ${account.index + 1}`;
+                  throw new Error(
+                    lastError?.message ?? `${label} cannot serve ${model ?? family}: its Antigravity quota is exhausted and no other account can take over.`
+                  );
+                }
+                stalledOn = account.index;
               }
               while (!shouldSwitchAccount) {
                 let forceThinkingRecovery = false;

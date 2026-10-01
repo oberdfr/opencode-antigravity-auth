@@ -279,7 +279,11 @@ export function resolveModelWithTier(requestedModel, options = {}) {
     }
     const budgetFamily = getBudgetFamily(resolvedModel);
     const budgets = THINKING_TIER_BUDGETS[budgetFamily];
-    const thinkingBudget = budgets[tier];
+    // The budget tables predate the minimal tier and have no row for it. Minimal is the
+    // smallest effort there is, so it is answered from the low row rather than left
+    // undefined and turned into no thinking at all.
+    const budgetTier = tier === "minimal" ? "low" : tier;
+    const thinkingBudget = budgetTier ? budgets[budgetTier] : undefined;
     return {
         actualModel: resolvedModel,
         thinkingBudget,

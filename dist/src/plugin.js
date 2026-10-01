@@ -18,6 +18,7 @@ import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import { loadConfig, initRuntimeConfig } from "./plugin/config";
 import { createSessionRecoveryHook, getRecoverySuccessToast, detectErrorType } from "./plugin/recovery";
 import { pinExhaustedMessage } from "./plugin/selection";
+import { isSelectionStalled } from "./plugin/stall";
 import { checkAccountsQuota } from "./plugin/quota";
 import { initDiskSignatureCache } from "./plugin/cache";
 import { createProactiveRefreshQueue } from "./plugin/refresh-queue";
@@ -1284,6 +1285,17 @@ export const createAntigravityPlugin = (providerId) => async ({ client, director
                             // Use AccountManager method which properly checks for disabled/cooling-down accounts
                             return accountManager.hasOtherAccountWithAntigravityAvailable(currentAccount.index, family, model);
                         };
+                        // The account the previous pass gave up on.
+                        //
+                        // Selection can hand back an account the family-level filter calls usable while
+                        // the header style it would use is rate-limited for it, and the answer to that is
+                        // to switch accounts without marking anything. When the manager keeps handing
+                        // back the same one, this loop went round fifty times making no request at all
+                        // and reporting nothing — the iteration guard stopped it, but only after burning
+                        // the whole budget, and the failure it produced described the symptom rather
+                        // than the cause. Being handed the same account twice in a row is a stall, not
+                        // progress, and is reported as one.
+                        let stalledOn;
                         while (true) {
                             // Check for abort at the start of each iteration
                             checkAborted();
@@ -1608,6 +1620,18 @@ export const createAntigravityPlugin = (providerId) => async ({ client, director
                                 else {
                                     shouldSwitchAccount = true;
                                 }
+                            }
+                            if (shouldSwitchAccount) {
+                                // Being handed the account we just gave up on means selection is not
+                                // making progress. Another pass would repeat this one exactly, so report
+                                // the account that could not serve the request instead of spending the
+                                // iteration budget discovering the same thing fifty more times.
+                                if (isSelectionStalled(stalledOn, account.index, true)) {
+                                    const label = account.email || `Account ${account.index + 1}`;
+                                    throw new Error(lastError?.message ??
+                                        `${label} cannot serve ${model ?? family}: its Antigravity quota is exhausted and no other account can take over.`);
+                                }
+                                stalledOn = account.index;
                             }
                             while (!shouldSwitchAccount) {
                                 // Flag to force thinking recovery on retry after API error

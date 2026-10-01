@@ -2,7 +2,15 @@ import type { HeaderStyle } from "../../constants";
 
 export type ModelFamily = "claude" | "gemini-flash" | "gemini-pro";
 
-export type ThinkingTier = "low" | "medium" | "high";
+/**
+ * A thinking effort.
+ *
+ * `minimal` is included because the catalog declares it as a selectable variant and the
+ * Gemini 3 level list contains it, so it reaches here at runtime. It has no SKU of its
+ * own on Cloud Code Assist, where it is served by `low`, so it is resolved rather than
+ * sent.
+ */
+export type ThinkingTier = "minimal" | "low" | "medium" | "high";
 
 /**
  * Context for request transformation.
