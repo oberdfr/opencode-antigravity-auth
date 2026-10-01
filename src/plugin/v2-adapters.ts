@@ -44,12 +44,41 @@ export function toV2Model(
       input: definition.modalities.input,
       output: definition.modalities.output,
     },
-    variants: Object.entries(definition.variants ?? {}).map(([variantID, variant]) => ({
-      id: Model.VariantID.make(variantID),
-      settings: {
-        ...(variant.thinkingLevel ? { thinkingLevel: variant.thinkingLevel } : {}),
-        ...(variant.thinkingConfig ? { thinkingConfig: variant.thinkingConfig } : {}),
-      },
-    })),
+    variants: Object.entries(definition.variants ?? {}).map(([variantID, variant]) => {
+      // The thinking config a Gemini 3 variant asks for, in the shape Google's own
+      // request builder reads.
+      const thinkingConfig = variant.thinkingConfig ?? (
+        variant.thinkingLevel
+          ? { includeThoughts: true, thinkingLevel: variant.thinkingLevel }
+          : undefined
+      );
+
+      return {
+        id: Model.VariantID.make(variantID),
+        // Both channels, because neither alone reaches the request.
+        //
+        // `settings` is what a variant is expected to carry and what OpenCode reads to
+        // decide a variant is applicable. `body` is what it actually merges into the
+        // outgoing request. Declaring only settings produced a variant the UI listed
+        // and accepted while the request it built contained no thinking config at all,
+        // so choosing a thinking level changed nothing about whether the model thought.
+        //
+        // The body patch is what makes the choice real, and it is kept identical to the
+        // settings form so the two can never disagree about what was asked for.
+        settings: thinkingConfig ? { thinkingConfig } : {},
+        ...(thinkingConfig?.thinkingLevel
+          ? {
+              body: {
+                generationConfig: {
+                  thinkingConfig: {
+                    includeThoughts: thinkingConfig.includeThoughts ?? true,
+                    thinkingLevel: thinkingConfig.thinkingLevel,
+                  },
+                },
+              },
+            }
+          : {}),
+      };
+    }),
   };
 }

@@ -63,10 +63,25 @@ describe("V2 model adapter", () => {
         input: ["text", "image", "pdf"],
         output: ["text"],
       },
+      // Nested under thinkingConfig, which is the shape OpenCode translates. A bare
+      // thinkingLevel is not a key it recognises, and a variant set that way arrives
+      // at the model with the setting dropped.
       variants: [
-        { id: "low", settings: { thinkingLevel: "low" } },
-        { id: "medium", settings: { thinkingLevel: "medium" } },
-        { id: "high", settings: { thinkingLevel: "high" } },
+        {
+          id: "low",
+          settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+          body: { generationConfig: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } } },
+        },
+        {
+          id: "medium",
+          settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } },
+          body: { generationConfig: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } } },
+        },
+        {
+          id: "high",
+          settings: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
+          body: { generationConfig: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } } },
+        },
       ],
     });
   });

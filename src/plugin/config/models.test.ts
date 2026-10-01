@@ -34,28 +34,30 @@ describe("OPENCODE_MODEL_DEFINITIONS", () => {
 
   it("defines Gemini 3 variants for Antigravity models", () => {
     expect(getModel("antigravity-gemini-3-pro").variants).toEqual({
-      low: { thinkingLevel: "low" },
-      high: { thinkingLevel: "high" },
+      low: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+      high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
     });
 
     expect(getModel("antigravity-gemini-3.1-pro").variants).toEqual({
-      low: { thinkingLevel: "low" },
-      high: { thinkingLevel: "high" },
+      low: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+      high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
     });
 
     expect(getModel("antigravity-gemini-3-flash").variants).toEqual({
-      minimal: { thinkingLevel: "minimal" },
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" },
+      minimal: { thinkingConfig: { includeThoughts: true, thinkingLevel: "minimal" } },
+      low: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+      medium: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } },
+      high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
     });
   });
 
   it("defines tiered flash variants for Gemini 3.6/3.7/3.8", () => {
+    // Nested under thinkingConfig because that is the shape OpenCode translates into
+    // the request; a bare thinkingLevel is dropped before it reaches the model.
     const expected = {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" },
+      low: { thinkingConfig: { includeThoughts: true, thinkingLevel: "low" } },
+      medium: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } },
+      high: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
     };
     expect(getModel("antigravity-gemini-3.6-flash").variants).toEqual(expected);
     expect(getModel("antigravity-gemini-3.7-flash").variants).toEqual(expected);

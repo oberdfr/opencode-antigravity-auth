@@ -35,6 +35,8 @@ export interface AntigravityUsageMetadata {
  */
 export interface ThinkingConfig {
     thinkingBudget?: number;
+    /** Gemini 3 level-based thinking, which asks for effort rather than a token count. */
+    thinkingLevel?: string;
     includeThoughts?: boolean;
 }
 /**

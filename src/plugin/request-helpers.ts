@@ -721,6 +721,8 @@ export interface AntigravityUsageMetadata {
  */
 export interface ThinkingConfig {
   thinkingBudget?: number;
+  /** Gemini 3 level-based thinking, which asks for effort rather than a token count. */
+  thinkingLevel?: string;
   includeThoughts?: boolean;
 }
 
@@ -756,9 +758,18 @@ export function extractThinkingConfig(
 
   if (thinkingConfig && typeof thinkingConfig === "object") {
     const config = thinkingConfig as Record<string, unknown>;
+    const level = typeof config.thinkingLevel === "string" ? config.thinkingLevel : undefined;
+    const budget = typeof config.thinkingBudget === "number" ? config.thinkingBudget : undefined;
+
     return {
       includeThoughts: Boolean(config.includeThoughts),
-      thinkingBudget: typeof config.thinkingBudget === "number" ? config.thinkingBudget : DEFAULT_THINKING_BUDGET,
+      // A Gemini 3 level and a numeric budget are two ways of asking for the same
+      // thing, and the client sends whichever its model uses. Defaulting the budget
+      // when the level is present invented a number the caller never asked for and
+      // left the level to be dropped on the way through, so a level-only request came
+      // out as a budget-only one.
+      ...(level ? { thinkingLevel: level } : {}),
+      thinkingBudget: budget ?? (level ? undefined : DEFAULT_THINKING_BUDGET),
     };
   }
 
@@ -1551,20 +1562,43 @@ export function normalizeThinkingConfig(config: unknown): ThinkingConfig | undef
   const record = config as Record<string, unknown>;
   const budgetRaw = record.thinkingBudget ?? record.thinking_budget;
   const includeRaw = record.includeThoughts ?? record.include_thoughts;
+  const levelRaw = record.thinkingLevel ?? record.thinking_level;
 
   const thinkingBudget = typeof budgetRaw === "number" && Number.isFinite(budgetRaw) ? budgetRaw : undefined;
   const includeThoughts = typeof includeRaw === "boolean" ? includeRaw : undefined;
+  const thinkingLevel = typeof levelRaw === "string" && levelRaw.length > 0 ? levelRaw : undefined;
 
-  const enableThinking = thinkingBudget !== undefined && thinkingBudget > 0;
-  const finalInclude = enableThinking ? includeThoughts ?? false : false;
+  // Either knob turns thinking on.
+  //
+  // This used to be asked of the budget alone, which is fine for Claude and Gemini 2.5
+  // and wrong for Gemini 3, whose thinking is requested with a level and carries no
+  // budget at all. Every level-based request therefore counted as "thinking not
+  // enabled", and the include flag was resolved from that: false. The model was asked
+  // for high, did the work, and returned none of it — a setting that looked applied and
+  // was silently doing the opposite of what it said.
+  const enableThinking =
+    thinkingLevel !== undefined || (thinkingBudget !== undefined && thinkingBudget > 0);
+  // Defaults to on once thinking is enabled. The two knobs are separate: the level says
+  // how much to think, the include flag says whether any of it reaches the client, and a
+  // request that asks for thinking without saying otherwise wants to see it.
+  const finalInclude = enableThinking ? includeThoughts ?? true : false;
 
-  if (!enableThinking && finalInclude === false && thinkingBudget === undefined && includeThoughts === undefined) {
+  if (
+    !enableThinking &&
+    finalInclude === false &&
+    thinkingBudget === undefined &&
+    includeThoughts === undefined &&
+    thinkingLevel === undefined
+  ) {
     return undefined;
   }
 
   const normalized: ThinkingConfig = {};
   if (thinkingBudget !== undefined) {
     normalized.thinkingBudget = thinkingBudget;
+  }
+  if (thinkingLevel !== undefined) {
+    normalized.thinkingLevel = thinkingLevel;
   }
   if (finalInclude !== undefined) {
     normalized.includeThoughts = finalInclude;

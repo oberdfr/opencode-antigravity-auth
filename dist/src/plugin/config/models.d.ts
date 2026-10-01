@@ -1,7 +1,22 @@
 import type { ProviderModel } from "../types";
 export type ModelThinkingLevel = "minimal" | "low" | "medium" | "high";
 export interface ModelThinkingConfig {
-    thinkingBudget: number;
+    thinkingBudget?: number;
+    /**
+     * Gemini 3 level-based thinking.
+     *
+     * Mutually exclusive with thinkingBudget: the gateway takes one or the other, and
+     * sending both leaves the choice to it.
+     */
+    thinkingLevel?: ModelThinkingLevel;
+    /**
+     * Whether the model returns its reasoning alongside the answer.
+     *
+     * A level on its own does not do this. The level says how much to think and this
+     * says whether any of it reaches the client, so a config carrying only the level
+     * spends the effort and shows nothing for it.
+     */
+    includeThoughts?: boolean;
 }
 export interface ModelVariant {
     thinkingLevel?: ModelThinkingLevel;

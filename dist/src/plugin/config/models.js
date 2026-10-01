@@ -8,8 +8,12 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65535 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            low: { thinkingLevel: "low" },
-            high: { thinkingLevel: "high" },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-gemini-3.1-pro": {
@@ -17,8 +21,12 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65535 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            low: { thinkingLevel: "low" },
-            high: { thinkingLevel: "high" },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-gemini-3.8-flash": {
@@ -26,9 +34,15 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65536 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            low: { thinkingLevel: "low" },
-            medium: { thinkingLevel: "medium" },
-            high: { thinkingLevel: "high" },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            medium: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-gemini-3.7-flash": {
@@ -36,9 +50,15 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65536 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            low: { thinkingLevel: "low" },
-            medium: { thinkingLevel: "medium" },
-            high: { thinkingLevel: "high" },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            medium: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-gemini-3.6-flash": {
@@ -46,9 +66,15 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65536 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            low: { thinkingLevel: "low" },
-            medium: { thinkingLevel: "medium" },
-            high: { thinkingLevel: "high" },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            medium: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-gemini-3-flash": {
@@ -56,10 +82,18 @@ export const OPENCODE_MODEL_DEFINITIONS = {
         limit: { context: 1048576, output: 65536 },
         modalities: DEFAULT_MODALITIES,
         variants: {
-            minimal: { thinkingLevel: "minimal" },
-            low: { thinkingLevel: "low" },
-            medium: { thinkingLevel: "medium" },
-            high: { thinkingLevel: "high" },
+            minimal: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "minimal" },
+            },
+            low: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "low" },
+            },
+            medium: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" },
+            },
+            high: {
+                thinkingConfig: { includeThoughts: true, thinkingLevel: "high" },
+            },
         },
     },
     "antigravity-claude-sonnet-4-6": {

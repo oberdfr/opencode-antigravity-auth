@@ -1674,8 +1674,12 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      low: { thinkingLevel: "low" },
-      high: { thinkingLevel: "high" }
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-gemini-3.1-pro": {
@@ -1683,8 +1687,12 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65535 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      low: { thinkingLevel: "low" },
-      high: { thinkingLevel: "high" }
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-gemini-3.8-flash": {
@@ -1692,9 +1700,15 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" }
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      medium: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-gemini-3.7-flash": {
@@ -1702,9 +1716,15 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" }
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      medium: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-gemini-3.6-flash": {
@@ -1712,9 +1732,15 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" }
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      medium: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-gemini-3-flash": {
@@ -1722,10 +1748,18 @@ var OPENCODE_MODEL_DEFINITIONS = {
     limit: { context: 1048576, output: 65536 },
     modalities: DEFAULT_MODALITIES,
     variants: {
-      minimal: { thinkingLevel: "minimal" },
-      low: { thinkingLevel: "low" },
-      medium: { thinkingLevel: "medium" },
-      high: { thinkingLevel: "high" }
+      minimal: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "minimal" }
+      },
+      low: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "low" }
+      },
+      medium: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" }
+      },
+      high: {
+        thinkingConfig: { includeThoughts: true, thinkingLevel: "high" }
+      }
     }
   },
   "antigravity-claude-sonnet-4-6": {
@@ -3903,9 +3937,17 @@ function extractThinkingConfig(requestPayload, rawGenerationConfig, extraBody) {
   const thinkingConfig = rawGenerationConfig?.thinkingConfig ?? extraBody?.thinkingConfig ?? requestPayload.thinkingConfig;
   if (thinkingConfig && typeof thinkingConfig === "object") {
     const config = thinkingConfig;
+    const level = typeof config.thinkingLevel === "string" ? config.thinkingLevel : void 0;
+    const budget = typeof config.thinkingBudget === "number" ? config.thinkingBudget : void 0;
     return {
       includeThoughts: Boolean(config.includeThoughts),
-      thinkingBudget: typeof config.thinkingBudget === "number" ? config.thinkingBudget : DEFAULT_THINKING_BUDGET
+      // A Gemini 3 level and a numeric budget are two ways of asking for the same
+      // thing, and the client sends whichever its model uses. Defaulting the budget
+      // when the level is present invented a number the caller never asked for and
+      // left the level to be dropped on the way through, so a level-only request came
+      // out as a budget-only one.
+      ...level ? { thinkingLevel: level } : {},
+      thinkingBudget: budget ?? (level ? void 0 : DEFAULT_THINKING_BUDGET)
     };
   }
   const anthropicThinking = extraBody?.thinking ?? requestPayload.thinking;
@@ -4392,16 +4434,21 @@ function normalizeThinkingConfig(config) {
   const record = config;
   const budgetRaw = record.thinkingBudget ?? record.thinking_budget;
   const includeRaw = record.includeThoughts ?? record.include_thoughts;
+  const levelRaw = record.thinkingLevel ?? record.thinking_level;
   const thinkingBudget = typeof budgetRaw === "number" && Number.isFinite(budgetRaw) ? budgetRaw : void 0;
   const includeThoughts = typeof includeRaw === "boolean" ? includeRaw : void 0;
-  const enableThinking = thinkingBudget !== void 0 && thinkingBudget > 0;
-  const finalInclude = enableThinking ? includeThoughts ?? false : false;
-  if (!enableThinking && finalInclude === false && thinkingBudget === void 0 && includeThoughts === void 0) {
+  const thinkingLevel = typeof levelRaw === "string" && levelRaw.length > 0 ? levelRaw : void 0;
+  const enableThinking = thinkingLevel !== void 0 || thinkingBudget !== void 0 && thinkingBudget > 0;
+  const finalInclude = enableThinking ? includeThoughts ?? true : false;
+  if (!enableThinking && finalInclude === false && thinkingBudget === void 0 && includeThoughts === void 0 && thinkingLevel === void 0) {
     return void 0;
   }
   const normalized = {};
   if (thinkingBudget !== void 0) {
     normalized.thinkingBudget = thinkingBudget;
+  }
+  if (thinkingLevel !== void 0) {
+    normalized.thinkingLevel = thinkingLevel;
   }
   if (finalInclude !== void 0) {
     normalized.includeThoughts = finalInclude;
@@ -13323,13 +13370,33 @@ function toV2Model(providerID, id, definition) {
       input: definition.modalities.input,
       output: definition.modalities.output
     },
-    variants: Object.entries(definition.variants ?? {}).map(([variantID, variant]) => ({
-      id: Model.VariantID.make(variantID),
-      settings: {
-        ...variant.thinkingLevel ? { thinkingLevel: variant.thinkingLevel } : {},
-        ...variant.thinkingConfig ? { thinkingConfig: variant.thinkingConfig } : {}
-      }
-    }))
+    variants: Object.entries(definition.variants ?? {}).map(([variantID, variant]) => {
+      const thinkingConfig = variant.thinkingConfig ?? (variant.thinkingLevel ? { includeThoughts: true, thinkingLevel: variant.thinkingLevel } : void 0);
+      return {
+        id: Model.VariantID.make(variantID),
+        // Both channels, because neither alone reaches the request.
+        //
+        // `settings` is what a variant is expected to carry and what OpenCode reads to
+        // decide a variant is applicable. `body` is what it actually merges into the
+        // outgoing request. Declaring only settings produced a variant the UI listed
+        // and accepted while the request it built contained no thinking config at all,
+        // so choosing a thinking level changed nothing about whether the model thought.
+        //
+        // The body patch is what makes the choice real, and it is kept identical to the
+        // settings form so the two can never disagree about what was asked for.
+        settings: thinkingConfig ? { thinkingConfig } : {},
+        ...thinkingConfig?.thinkingLevel ? {
+          body: {
+            generationConfig: {
+              thinkingConfig: {
+                includeThoughts: thinkingConfig.includeThoughts ?? true,
+                thinkingLevel: thinkingConfig.thinkingLevel
+              }
+            }
+          }
+        } : {}
+      };
+    })
   };
 }
 
