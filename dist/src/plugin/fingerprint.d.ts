@@ -47,12 +47,6 @@ export declare function generateFingerprint(): Fingerprint;
  */
 export declare function collectCurrentFingerprint(): Fingerprint;
 /**
- * Update the version in a fingerprint's userAgent to match the current runtime version.
- * Called after version fetcher resolves so saved fingerprints always carry the latest version.
- * Returns true if the userAgent was changed.
- */
-export declare function updateFingerprintVersion(fingerprint: Fingerprint): boolean;
-/**
  * Build HTTP headers from a fingerprint object.
  * These headers are used to identify the "device" making API requests.
  */

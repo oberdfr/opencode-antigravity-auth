@@ -3,7 +3,7 @@ import { loadAccounts, saveAccounts, type AccountStorageV4, type AccountMetadata
 import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { getHealthTracker, getTokenTracker, selectHybridAccount, type AccountWithMetrics } from "./rotation";
-import { generateFingerprint, updateFingerprintVersion, type Fingerprint, type FingerprintVersion, MAX_FINGERPRINT_HISTORY } from "./fingerprint";
+import { generateFingerprint, type Fingerprint, type FingerprintVersion, MAX_FINGERPRINT_HISTORY } from "./fingerprint";
 import type { QuotaGroup, QuotaGroupSummary, QuotaWindowSummary } from "./quota";
 import { getModelFamily } from "./transform/model-resolver";
 import { debugLogToFile } from "./debug";
@@ -424,15 +424,10 @@ export class AccountManager {
         })
         .filter((a): a is ManagedAccount => a !== null);
 
-      // Update fingerprint versions to match the current runtime version.
-      // Saved fingerprints may carry an older version string; this ensures
-      // they always reflect the latest fetched (or fallback) version.
-      let fingerprintVersionChanged = false;
-      for (const acc of this.accounts) {
-        if (acc.fingerprint && updateFingerprintVersion(acc.fingerprint)) {
-          fingerprintVersionChanged = true;
-        }
-      }
+      // No rewriting of stored fingerprints here. The user agent is built when the
+      // request goes out, from the version the hub publishes, so keeping a version
+      // current on disk would maintain a string nothing sends — and would write the
+      // accounts file on every load whenever it changed.
 
       this.cursor = clampNonNegativeInt(stored.activeIndex, 0);
       // The pin is part of the pool as stored, so it is loaded here rather than passed
@@ -450,11 +445,6 @@ export class AccountManager {
           stored.activeIndexByFamily?.gemini,
           defaultIndex
         ) % this.accounts.length;
-      }
-
-      // Persist updated fingerprint versions to disk
-      if (fingerprintVersionChanged) {
-        this.requestSaveToDisk();
       }
 
       return;
@@ -595,7 +585,19 @@ export class AccountManager {
             index: acc.index,
             lastUsed: acc.lastUsed,
             healthScore: healthTracker.getScore(acc.index),
-            isRateLimited: isRateLimitedForFamily(acc, family, model) || 
+            // For the style this request will actually use, not for the family.
+            //
+            // The family test asks whether the account is blocked on *both* styles, which
+            // is the right question when the answer decides whether any request could
+            // reach the account at all. It is the wrong question here, because the
+            // request is going out on one style: an account blocked on that style was
+            // judged available because the other style had no entry for its model, the
+            // request was refused, and the refusal was recorded under the same key that
+            // was never consulted — so it was selected again, and again, on every pass.
+            //
+            // The alternate style is not lost by this: the caller falls back to it when
+            // nothing can serve the preferred one.
+            isRateLimited: isRateLimitedForHeaderStyle(acc, family, headerStyle, model) ||
                           isOverSoftQuotaThreshold(acc, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model),
             isCoolingDown: this.isAccountCoolingDown(acc),
           };

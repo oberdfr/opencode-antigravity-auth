@@ -71,6 +71,7 @@ import {
 } from "./transform";
 import { detectErrorType } from "./recovery";
 import { antigravityIdentity, type AntigravityIdentity } from "./antigravity-envelope";
+import { getAntigravityHubUserAgent } from "./hub-version";
 import { getSessionFingerprint, buildFingerprintHeaders, type Fingerprint } from "./fingerprint";
 import type { GoogleSearchConfig } from "./transform/types";
 
@@ -1584,9 +1585,12 @@ export function prepareAntigravityRequest(
     const fingerprint = options?.fingerprint ?? getSessionFingerprint();
     const fingerprintHeaders = buildFingerprintHeaders(fingerprint);
 
+    // The hub agent either way. The fingerprint supplies it in practice, but the
+    // randomised set this used to fall back to is the older shape, and the gateway
+    // refuses that one with a message about licensing rather than about the header.
     headers.set(
       "User-Agent",
-      fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"],
+      fingerprintHeaders["User-Agent"] || getAntigravityHubUserAgent(),
     );
   } else {
     // Gemini CLI mode: match opencode-gemini-auth Code Assist header set exactly

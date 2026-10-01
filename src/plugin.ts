@@ -3498,7 +3498,14 @@ function resolveHeaderRoutingDecision(
     cliFirst,
     preferredHeaderStyle,
     explicitQuota,
-    allowQuotaFallback: family === "gemini",
+    // The other style is an escape for a model that could be served by either. A model
+    // that is explicitly Antigravity-quota has no Gemini CLI allowance behind it, and
+    // since nothing ever records one, the fallback reads that absence as room to spare
+    // and hands back the very account the gateway just refused. It then asks for the same
+    // thing on the other style, is refused again, and the request walks its retries on one
+    // account that was never going to answer. So the fallback is off for those models, and
+    // the caller is told nothing can serve instead.
+    allowQuotaFallback: family === "gemini" && !explicitQuota,
   };
 }
 

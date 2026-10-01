@@ -154,7 +154,11 @@ describe("header routing decision", () => {
     });
   });
 
-  it("keeps explicit antigravity prefix as primary route while fallback remains available", () => {
+  // An explicit antigravity- prefix means the model is served on Antigravity quota. There
+  // is no Gemini CLI allowance behind it, and since nothing ever records one, allowing the
+  // fallback there hands back the account the gateway just refused and asks it again on
+  // the other style, which is refused too. The prefix has to win outright.
+  it("keeps explicit antigravity prefix as the only route", () => {
     const decision = resolveHeaderRoutingDecision?.(
       "https://generativelanguage.googleapis.com/v1beta/models/antigravity-gemini-3-flash:streamGenerateContent",
       "gemini",
@@ -167,7 +171,7 @@ describe("header routing decision", () => {
       cliFirst: true,
       preferredHeaderStyle: "antigravity",
       explicitQuota: true,
-      allowQuotaFallback: true,
+      allowQuotaFallback: false,
     });
   });
 

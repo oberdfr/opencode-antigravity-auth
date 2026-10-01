@@ -6539,9 +6539,6 @@ function antigravityIdentity(conversation, isClaude, lastExecutionId) {
   };
 }
 
-// src/plugin/fingerprint.ts
-import * as crypto from "node:crypto";
-
 // src/plugin/hub-version.ts
 var ANTIGRAVITY_HUB_VERSION_FALLBACK = "2.8.0";
 var ANTIGRAVITY_HUB_VERSION_FLOOR = "2.8.0";
@@ -6600,6 +6597,7 @@ function getAntigravityHubUserAgent() {
 }
 
 // src/plugin/fingerprint.ts
+import * as crypto from "node:crypto";
 var OS_VERSIONS = {
   darwin: ["10.15.7", "11.6.8", "12.6.3", "13.5.2", "14.2.1", "14.5"],
   win32: ["10.0.19041", "10.0.19042", "10.0.19043", "10.0.22000", "10.0.22621", "10.0.22631"],
@@ -6645,16 +6643,6 @@ function generateFingerprint() {
     },
     createdAt: Date.now()
   };
-}
-function updateFingerprintVersion(fingerprint) {
-  const currentVersion = getAntigravityVersion();
-  const versionPattern = /^(antigravity\/)([\d.]+)/;
-  const match = fingerprint.userAgent.match(versionPattern);
-  if (!match || match[2] === currentVersion) {
-    return false;
-  }
-  fingerprint.userAgent = fingerprint.userAgent.replace(versionPattern, `$1${currentVersion}`);
-  return true;
 }
 function buildFingerprintHeaders(fingerprint) {
   if (!fingerprint) {
@@ -7683,7 +7671,7 @@ ${hint}`;
     const fingerprintHeaders = buildFingerprintHeaders(fingerprint);
     headers.set(
       "User-Agent",
-      fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"]
+      fingerprintHeaders["User-Agent"] || getAntigravityHubUserAgent()
     );
   } else {
     headers.set("User-Agent", GEMINI_CLI_HEADERS["User-Agent"]);
@@ -8818,12 +8806,6 @@ var AccountManager = class _AccountManager {
           verificationUrl: acc.verificationUrl
         };
       }).filter((a) => a !== null);
-      let fingerprintVersionChanged = false;
-      for (const acc of this.accounts) {
-        if (acc.fingerprint && updateFingerprintVersion(acc.fingerprint)) {
-          fingerprintVersionChanged = true;
-        }
-      }
       this.cursor = clampNonNegativeInt(stored.activeIndex, 0);
       this.selection = stored.selection ?? { pinnedEmails: [] };
       if (this.accounts.length > 0) {
@@ -8837,9 +8819,6 @@ var AccountManager = class _AccountManager {
           stored.activeIndexByFamily?.gemini,
           defaultIndex
         ) % this.accounts.length;
-      }
-      if (fingerprintVersionChanged) {
-        this.requestSaveToDisk();
       }
       return;
     }
@@ -8949,7 +8928,19 @@ var AccountManager = class _AccountManager {
           index: acc.index,
           lastUsed: acc.lastUsed,
           healthScore: healthTracker.getScore(acc.index),
-          isRateLimited: isRateLimitedForFamily(acc, family, model) || isOverSoftQuotaThreshold(acc, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model),
+          // For the style this request will actually use, not for the family.
+          //
+          // The family test asks whether the account is blocked on *both* styles, which
+          // is the right question when the answer decides whether any request could
+          // reach the account at all. It is the wrong question here, because the
+          // request is going out on one style: an account blocked on that style was
+          // judged available because the other style had no entry for its model, the
+          // request was refused, and the refusal was recorded under the same key that
+          // was never consulted — so it was selected again, and again, on every pass.
+          //
+          // The alternate style is not lost by this: the caller falls back to it when
+          // nothing can serve the preferred one.
+          isRateLimited: isRateLimitedForHeaderStyle(acc, family, headerStyle, model) || isOverSoftQuotaThreshold(acc, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model),
           isCoolingDown: this.isAccountCoolingDown(acc)
         };
       });
@@ -13380,7 +13371,14 @@ function resolveHeaderRoutingDecision(urlString, family, config) {
     cliFirst,
     preferredHeaderStyle,
     explicitQuota,
-    allowQuotaFallback: family === "gemini"
+    // The other style is an escape for a model that could be served by either. A model
+    // that is explicitly Antigravity-quota has no Gemini CLI allowance behind it, and
+    // since nothing ever records one, the fallback reads that absence as room to spare
+    // and hands back the very account the gateway just refused. It then asks for the same
+    // thing on the other style, is refused again, and the request walks its retries on one
+    // account that was never going to answer. So the fallback is off for those models, and
+    // the caller is told nothing can serve instead.
+    allowQuotaFallback: family === "gemini" && !explicitQuota
   };
 }
 function getCliFirst(config) {
