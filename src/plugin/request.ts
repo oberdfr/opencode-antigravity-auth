@@ -76,8 +76,6 @@ const log = createLogger("request");
 
 const PLUGIN_SESSION_ID = `-${crypto.randomUUID()}`;
 
-const sessionDisplayedThinkingHashes = new Set<string>();
-
 const MIN_SIGNATURE_LENGTH = 50;
 
 function buildSignatureSessionKey(
@@ -1684,6 +1682,23 @@ export async function transformAntigravityResponse(
       note: "Streaming SSE response (real-time transform)",
     });
 
+    // One set per response, not one per process.
+    //
+    // This used to be a module-level Set that was never cleared, so every thinking
+    // chunk Gemini 3 ever streamed stayed in it for the lifetime of the server. Two
+    // things followed, and both got worse the longer the session ran: the Set grew
+    // without bound, and because each entry is the hash of the whole accumulated
+    // thinking text, hashing it on every chunk made the work quadratic in how much
+    // the model had thought. That is the shape of the reported symptom — a Gemini 3
+    // session that runs fine for a few minutes and then pins a core and grows until
+    // the process is killed, and only on Gemini 3, which is the one family this set
+    // was ever fed for.
+    //
+    // Dedup only ever needed to look within the response being transformed, which is
+    // the scope of the stream it is called from, so scoping it there is what the rest
+    // of this function was already relying on.
+    const displayedThinkingHashes = new Set<string>();
+
     const streamingTransformer = createStreamingTransformer(
       defaultSignatureStore,
       {
@@ -1696,7 +1711,7 @@ export async function transformAntigravityResponse(
         signatureSessionKey: sessionId,
         debugText,
         cacheSignatures,
-        displayedThinkingHashes: effectiveModel && isGemini3Model(effectiveModel) ? sessionDisplayedThinkingHashes : undefined,
+        displayedThinkingHashes: effectiveModel && isGemini3Model(effectiveModel) ? displayedThinkingHashes : undefined,
         // injectSyntheticThinking removed - keep_thinking now unified with debug via debugText
       },
     );

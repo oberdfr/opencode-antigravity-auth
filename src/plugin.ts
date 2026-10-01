@@ -43,7 +43,8 @@ import { clearAccounts, loadAccounts, saveAccounts, saveAccountsReplace } from "
 import { AccountManager, type ModelFamily, parseRateLimitReason, calculateBackoffMs, computeSoftQuotaCacheTtlMs } from "./plugin/accounts";
 import { createAutoUpdateCheckerHook } from "./hooks/auto-update-checker";
 import { loadConfig, initRuntimeConfig, type AntigravityConfig } from "./plugin/config";
-import { createSessionRecoveryHook, getRecoverySuccessToast } from "./plugin/recovery";
+import { createSessionRecoveryHook, getRecoverySuccessToast, detectErrorType } from "./plugin/recovery";
+import { pinExhaustedMessage } from "./plugin/selection";
 import { checkAccountsQuota } from "./plugin/quota";
 import { initDiskSignatureCache } from "./plugin/cache";
 import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./plugin/refresh-queue";
@@ -1054,6 +1055,16 @@ const FIRST_RETRY_DELAY_MS = 1000;      // 1s - first 429 quick retry on same ac
 const SWITCH_ACCOUNT_DELAY_MS = 5000;   // 5s - delay before switching to another account
 
 /**
+ * Ceiling on the account/endpoint selection loop for one request.
+ *
+ * Sized well above what a healthy run needs: the loop walks accounts and endpoints
+ * and retries, so a pool of several accounts with a transient capacity error or two
+ * still finishes inside this. It exists so that a combination the loop cannot satisfy
+ * ends as a reported failure rather than as a loop that never stops.
+ */
+const MAX_REQUEST_ATTEMPTS = 50;
+
+/**
  * Rate limit state tracking with time-window deduplication.
  * 
  * Problem: When multiple subagents hit 429 simultaneously, each would increment
@@ -1300,13 +1311,21 @@ export const createAntigravityPlugin = (providerId: string) => async (
           sessionID,
           error,
         };
-        
+
         // handleSessionRecovery now does the actual fix (injects tool_result, etc.)
         const recovered = await sessionRecovery.handleSessionRecovery(messageInfo);
 
-        // Only send "continue" AFTER successful tool_result_missing recovery
-        // (thinking recoveries already resume inside handleSessionRecovery)
-        if (recovered && sessionID && config.auto_resume) {
+        // Only tool_result_missing needs a prompt sent from here.
+        //
+        // The thinking recoveries resume inside handleSessionRecovery, so this used to
+        // fire a second prompt on top of theirs for every error type. Two prompts per
+        // error, each of which runs the model, and the error recurring means another
+        // pair: with nothing bounding the repeats that is the runaway that showed up
+        // as a spinning session that never came back. The comment above this branch
+        // already described the intended behaviour; the condition just did not match
+        // it.
+        const errorType = detectErrorType(error);
+        if (recovered && errorType === "tool_result_missing" && sessionID && config.auto_resume) {
           // For tool_result_missing, we need to send continue after injecting tool_results
           await client.session.prompt({
             path: { id: sessionID },
@@ -1492,6 +1511,7 @@ export const createAntigravityPlugin = (providerId: string) => async (
           let lastFailure: FailureContext | null = null;
           let lastError: Error | null = null;
           const abortSignal = init?.signal ?? undefined;
+          let guardIterations = 0;
 
           // Helper to check if request was aborted
           const checkAborted = () => {
@@ -1543,6 +1563,18 @@ export const createAntigravityPlugin = (providerId: string) => async (
           while (true) {
             // Check for abort at the start of each iteration
             checkAborted();
+
+            // Backstop against a spin that never resolves. Every branch below either
+            // returns, throws, or sleeps before continuing, so a correct run needs a
+            // handful of iterations; a large budget like this only ever gets reached
+            // when the state machine is going in circles, and it turns that from an
+            // unbounded loop into a failed request the user can see and retry.
+            guardIterations++;
+            if (guardIterations > MAX_REQUEST_ATTEMPTS) {
+              throw new Error(
+                `Antigravity gave up after ${MAX_REQUEST_ATTEMPTS} attempts without a usable account for ${family}.`,
+              );
+            }
             
             const accountCount = accountManager.getAccountCount();
             const routingDecision = resolveHeaderRoutingDecision(urlString, family, config);
@@ -1588,6 +1620,43 @@ export const createAntigravityPlugin = (providerId: string) => async (
                 pushDebug(
                   `selected-by-fallback idx=${account.index} preferred=${preferredHeaderStyle} alternate=${alternateHeaderStyle}`,
                 );
+              }
+            }
+
+            // Nothing usable inside the account selection the user made.
+            //
+            // Told before the request moves, not after: the user chose these accounts,
+            // so the fact that their quota ran out and that the request is now
+            // spending a different one is theirs to know. The fallback is drawn from
+            // the whole pool, and selection orders paid accounts first, so a free
+            // allowance is not spent while a paid one is idle.
+            if (!account && accountManager.hasSelection()) {
+              const exhaustion = accountManager.describeSelectionExhaustion();
+              if (exhaustion) {
+                const selection = accountManager.getSelection();
+                await showToast(
+                  pinExhaustedMessage(exhaustion, accountManager.getSelectableAccounts(), selection),
+                  "warning",
+                );
+                await accountManager.clearSelection();
+
+                account = accountManager.getCurrentOrNextForFamily(
+                  family,
+                  model,
+                  config.account_selection_strategy,
+                  preferredHeaderStyle,
+                  config.pid_offset_enabled,
+                  config.soft_quota_threshold_percent,
+                  softQuotaCacheTtlMs,
+                );
+                if (account) {
+                  const label = account.email || `Account ${account.index + 1}`;
+                  pushDebug(`selection-exhausted, widened to whole pool idx=${account.index} email=${label}`);
+                  await showToast(
+                    `Continuing with ${label}${account.tier === "free" ? " (free account)" : ""}.`,
+                    "info",
+                  );
+                }
               }
             }
             

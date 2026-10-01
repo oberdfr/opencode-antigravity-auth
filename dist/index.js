@@ -469,7 +469,13 @@ function mergeAccountStorage(existing, incoming) {
     version: 4,
     accounts: Array.from(accountMap.values()),
     activeIndex: incoming.activeIndex,
-    activeIndexByFamily: incoming.activeIndexByFamily
+    activeIndexByFamily: incoming.activeIndexByFamily,
+    // The caller's selection wins when it says anything at all, and otherwise the
+    // stored one is kept. Most writers here are not selection-aware — the quota read
+    // refreshes managed project ids on its way past — and dropping the field on those
+    // writes would silently unpin whatever the user had chosen, the next time quota
+    // happened to be read.
+    selection: incoming.selection ?? existing.selection
   };
 }
 function deduplicateAccountsByEmail(accounts) {
@@ -647,7 +653,15 @@ async function loadAccounts() {
       version: 4,
       accounts: deduplicatedAccounts,
       activeIndex,
-      activeIndexByFamily: storage.activeIndexByFamily
+      activeIndexByFamily: storage.activeIndexByFamily,
+      // Carried through, because this function rebuilds the pool field by field and
+      // anything not named here is silently dropped. That is not cosmetic: the account
+      // manager and the selection RPC both read the pool through here, so a dropped
+      // field means the user's account selection is on disk and invisible at the same
+      // time — the pool looks unrestricted while the stored choice says otherwise.
+      // The stored value is preferred over the in-memory one so a legacy file that
+      // predates the field still yields an empty selection rather than undefined.
+      selection: storage.selection ?? { pinnedEmails: [] }
     };
   } catch (error) {
     const code = error.code;
@@ -3166,6 +3180,7 @@ function hashString(str) {
   }
   return (hash >>> 0).toString(16);
 }
+var MAX_DISPLAYED_THINKING_HASHES = 4096;
 function createThoughtBuffer() {
   const buffer = /* @__PURE__ */ new Map();
   return {
@@ -3197,14 +3212,6 @@ function deduplicateThinkingText(response, sentBuffer, displayedThinkingHashes) 
         }
         if (p.thought === true || p.type === "thinking") {
           const fullText = p.text || p.thinking || "";
-          if (displayedThinkingHashes) {
-            const hash = hashString(fullText);
-            if (displayedThinkingHashes.has(hash)) {
-              sentBuffer.set(index, fullText);
-              return null;
-            }
-            displayedThinkingHashes.add(hash);
-          }
           const sentText = sentBuffer.get(index) ?? "";
           if (fullText.startsWith(sentText)) {
             const delta = fullText.slice(sentText.length);
@@ -3213,6 +3220,16 @@ function deduplicateThinkingText(response, sentBuffer, displayedThinkingHashes) 
               return { ...p, text: delta, thinking: delta };
             }
             return null;
+          }
+          if (displayedThinkingHashes) {
+            const hash = hashString(fullText);
+            if (displayedThinkingHashes.has(hash)) {
+              sentBuffer.set(index, fullText);
+              return null;
+            }
+            if (displayedThinkingHashes.size < MAX_DISPLAYED_THINKING_HASHES) {
+              displayedThinkingHashes.add(hash);
+            }
           }
           sentBuffer.set(index, fullText);
           return part;
@@ -3233,15 +3250,6 @@ function deduplicateThinkingText(response, sentBuffer, displayedThinkingHashes) 
       const b = block;
       if (b?.type === "thinking") {
         const fullText = b.thinking || b.text || "";
-        if (displayedThinkingHashes) {
-          const hash = hashString(fullText);
-          if (displayedThinkingHashes.has(hash)) {
-            sentBuffer.set(thinkingIndex, fullText);
-            thinkingIndex++;
-            return null;
-          }
-          displayedThinkingHashes.add(hash);
-        }
         const sentText = sentBuffer.get(thinkingIndex) ?? "";
         if (fullText.startsWith(sentText)) {
           const delta = fullText.slice(sentText.length);
@@ -3251,6 +3259,17 @@ function deduplicateThinkingText(response, sentBuffer, displayedThinkingHashes) 
             return { ...b, thinking: delta, text: delta };
           }
           return null;
+        }
+        if (displayedThinkingHashes) {
+          const hash = hashString(fullText);
+          if (displayedThinkingHashes.has(hash)) {
+            sentBuffer.set(thinkingIndex, fullText);
+            thinkingIndex++;
+            return null;
+          }
+          if (displayedThinkingHashes.size < MAX_DISPLAYED_THINKING_HASHES) {
+            displayedThinkingHashes.add(hash);
+          }
         }
         sentBuffer.set(thinkingIndex, fullText);
         thinkingIndex++;
@@ -6219,6 +6238,9 @@ async function resumeSession(client, config, directory) {
     return false;
   }
 }
+var MAX_RECOVERY_ATTEMPTS = 3;
+var ATTEMPT_WINDOW_MS = 6e4;
+var MAX_TRACKED_SESSIONS = 200;
 var TOAST_TITLES = {
   tool_result_missing: "Tool Crash Recovery",
   thinking_block_order: "Thinking Block Recovery",
@@ -6253,6 +6275,7 @@ function createSessionRecoveryHook(ctx, config) {
   }
   const { client, directory } = ctx;
   const processingErrors = /* @__PURE__ */ new Set();
+  const attemptsBySession = /* @__PURE__ */ new Map();
   let onAbortCallback = null;
   let onRecoveryCompleteCallback = null;
   const setOnAbortCallback = (callback) => {
@@ -6267,6 +6290,26 @@ function createSessionRecoveryHook(ctx, config) {
     if (!errorType) return false;
     const sessionID = info.sessionID;
     if (!sessionID) return false;
+    const attempt = attemptsBySession.get(sessionID);
+    const now = Date.now();
+    if (attempt && now - attempt.windowStart < ATTEMPT_WINDOW_MS) {
+      if (attempt.count >= MAX_RECOVERY_ATTEMPTS) {
+        createLogger("session-recovery").warn("Recovery budget spent; not retrying", {
+          sessionID,
+          errorType,
+          attempts: attempt.count
+        });
+        return false;
+      }
+      attempt.count++;
+    } else {
+      attemptsBySession.set(sessionID, { count: 1, windowStart: now });
+    }
+    if (attemptsBySession.size > MAX_TRACKED_SESSIONS) {
+      for (const [key, entry] of attemptsBySession) {
+        if (now - entry.windowStart >= ATTEMPT_WINDOW_MS) attemptsBySession.delete(key);
+      }
+    }
     let assistantMsgID = info.id;
     let msgs;
     const log11 = createLogger("session-recovery");
@@ -6433,7 +6476,6 @@ function getSessionFingerprint() {
 // src/plugin/request.ts
 var log6 = createLogger("request");
 var PLUGIN_SESSION_ID = `-${crypto2.randomUUID()}`;
-var sessionDisplayedThinkingHashes = /* @__PURE__ */ new Set();
 var MIN_SIGNATURE_LENGTH = 50;
 function buildSignatureSessionKey(sessionId, model, conversationKey, projectKey) {
   const modelKey = typeof model === "string" && model.trim() ? model.toLowerCase() : "unknown";
@@ -7505,6 +7547,7 @@ async function transformAntigravityResponse(response, streaming, debugContext, r
     logAntigravityDebugResponse(debugContext, response, {
       note: "Streaming SSE response (real-time transform)"
     });
+    const displayedThinkingHashes = /* @__PURE__ */ new Set();
     const streamingTransformer = createStreamingTransformer(
       defaultSignatureStore,
       {
@@ -7517,7 +7560,7 @@ async function transformAntigravityResponse(response, streaming, debugContext, r
         signatureSessionKey: sessionId,
         debugText,
         cacheSignatures,
-        displayedThinkingHashes: effectiveModel && isGemini3Model(effectiveModel) ? sessionDisplayedThinkingHashes : void 0
+        displayedThinkingHashes: effectiveModel && isGemini3Model(effectiveModel) ? displayedThinkingHashes : void 0
         // injectSyntheticThinking removed - keep_thinking now unified with debug via debugText
       }
     );
@@ -8295,6 +8338,39 @@ function initHealthTracker(config) {
   return globalHealthTracker;
 }
 
+// src/plugin/selection.ts
+function hasPin(selection) {
+  return Array.isArray(selection?.pinnedEmails) && selection.pinnedEmails.length > 0;
+}
+function accountTier(account) {
+  return account.tier === "free" ? "free" : "pro";
+}
+function isEligible(account, selection) {
+  if (!hasPin(selection)) return true;
+  const email = account.email;
+  return typeof email === "string" && selection.pinnedEmails.includes(email);
+}
+function compareByTierThenIndex(a, b) {
+  const byTier = (accountTier(a) === "pro" ? 0 : 1) - (accountTier(b) === "pro" ? 0 : 1);
+  return byTier !== 0 ? byTier : a.index - b.index;
+}
+function eligibleAccounts(accounts, selection) {
+  return accounts.filter((account) => isEligible(account, selection)).sort(compareByTierThenIndex);
+}
+function reportPinExhaustion(accounts, selection) {
+  if (!hasPin(selection)) return void 0;
+  const pinned = accounts.filter((account) => isEligible(account, selection));
+  if (pinned.length === 0) return void 0;
+  const fallbackAvailable = accounts.filter((account) => !isEligible(account, selection)).length;
+  if (fallbackAvailable === 0) return void 0;
+  return { pinned: pinned.length, fallbackAvailable };
+}
+function pinExhaustedMessage(report, accounts, selection) {
+  const named = accounts.filter((account) => isEligible(account, selection)).map((account) => account.email).filter((email) => typeof email === "string");
+  const list = named.length > 0 ? named.join(", ") : `${report.pinned} selected account(s)`;
+  return `Quota finished on your selected account(s): ${list}. Switching to the next available account (paid accounts first).`;
+}
+
 // src/plugin/accounts.ts
 var QUOTA_EXHAUSTED_BACKOFFS = [6e4, 3e5, 18e5, 72e5];
 var RATE_LIMIT_EXCEEDED_BACKOFF = 3e4;
@@ -8469,6 +8545,14 @@ var AccountManager = class _AccountManager {
   };
   lastToastAccountIndex = -1;
   lastToastTime = 0;
+  /**
+   * Which accounts the user chose, or an empty pin for the whole pool.
+   *
+   * Held here rather than passed into each selection call because it is a property of
+   * the pool, not of one request: every caller wants the same answer, and threading it
+   * through each call site is how a path ends up quietly ignoring it.
+   */
+  selection = { pinnedEmails: [] };
   savePending = false;
   saveTimeout = null;
   savePromiseResolvers = [];
@@ -8512,6 +8596,7 @@ var AccountManager = class _AccountManager {
           fingerprintHistory: acc.fingerprintHistory ?? [],
           cachedQuota: acc.cachedQuota,
           cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
+          tier: acc.tier,
           verificationRequired: acc.verificationRequired,
           verificationRequiredAt: acc.verificationRequiredAt,
           verificationRequiredReason: acc.verificationRequiredReason,
@@ -8525,6 +8610,7 @@ var AccountManager = class _AccountManager {
         }
       }
       this.cursor = clampNonNegativeInt(stored.activeIndex, 0);
+      this.selection = stored.selection ?? { pinnedEmails: [] };
       if (this.accounts.length > 0) {
         this.cursor = this.cursor % this.accounts.length;
         const defaultIndex = this.cursor;
@@ -8642,7 +8728,7 @@ var AccountManager = class _AccountManager {
     if (strategy === "hybrid") {
       const healthTracker = getHealthTracker();
       const tokenTracker = getTokenTracker();
-      const accountsWithMetrics = this.accounts.filter((acc) => acc.enabled !== false).map((acc) => {
+      const accountsWithMetrics = eligibleAccounts(this.accounts, this.selection).filter((acc) => acc.enabled !== false).map((acc) => {
         clearExpiredRateLimits(acc);
         return {
           index: acc.index,
@@ -8690,7 +8776,7 @@ var AccountManager = class _AccountManager {
     return next;
   }
   getNextForFamily(family, model, headerStyle = "antigravity", softQuotaThresholdPercent = 100, softQuotaCacheTtlMs = 10 * 60 * 1e3) {
-    const available = this.accounts.filter((a) => {
+    const available = eligibleAccounts(this.accounts, this.selection).filter((a) => {
       clearExpiredRateLimits(a);
       return a.enabled !== false && !isRateLimitedForHeaderStyle(a, family, headerStyle, model) && !isOverSoftQuotaThreshold(a, family, softQuotaThresholdPercent, softQuotaCacheTtlMs, model) && !this.isAccountCoolingDown(a);
     });
@@ -8717,6 +8803,79 @@ var AccountManager = class _AccountManager {
     const account = this.accounts.find((a) => a.index === accountIndex);
     if (account) {
       account.lastUsed = nowMs();
+    }
+  }
+  /** The accounts the user chose, or an empty pin for the whole pool. */
+  getSelection() {
+    return { pinnedEmails: [...this.selection.pinnedEmails] };
+  }
+  /** Whether the pool is currently narrowed to specific accounts. */
+  hasSelection() {
+    return hasPin(this.selection);
+  }
+  /**
+   * Narrows the pool to the given accounts, or widens it back to all of them.
+   *
+   * Emails that are not in the pool are dropped rather than stored, so a selection
+   * naming a removed account does not leave a permanent hole in the pool that reads as
+   * "this account is excluded" with no way to tell it from a typo.
+   *
+   * Also resets the per-family cursors: they point into the old ordering, and leaving
+   * them would make the first request after a change land on an arbitrary account
+   * rather than the one the new selection puts first.
+   */
+  async setSelection(pinnedEmails) {
+    const known = new Set(this.accounts.map((account) => account.email));
+    const wanted = new Set(pinnedEmails.map((email) => email.trim()).filter((email) => email.length > 0));
+    this.selection = {
+      pinnedEmails: [...wanted].filter((email) => known.has(email)).sort()
+    };
+    this.currentAccountIndexByFamily.claude = -1;
+    this.currentAccountIndexByFamily.gemini = -1;
+    this.sessionOffsetApplied.claude = false;
+    this.sessionOffsetApplied.gemini = false;
+    this.cursor = 0;
+    await this.persistSelection();
+    return this.getSelection();
+  }
+  /**
+   * Widens the pool back to every account.
+   *
+   * Called when the pin has nothing usable left and the user has been told. The pin is
+   * not restored afterwards on purpose: leaving it in force would make the very next
+   * request widen itself again and re-send the same warning, once per request, for as
+   * long as the condition held. The widening is persisted so it survives the restart
+   * that a wedged session usually ends in.
+   */
+  async clearSelection() {
+    if (!hasPin(this.selection)) return this.getSelection();
+    this.selection = { pinnedEmails: [] };
+    this.currentAccountIndexByFamily.claude = -1;
+    this.currentAccountIndexByFamily.gemini = -1;
+    this.sessionOffsetApplied.claude = false;
+    this.sessionOffsetApplied.gemini = false;
+    this.cursor = 0;
+    await this.persistSelection();
+    return this.getSelection();
+  }
+  /**
+   * Describes a pin that has no usable account left, for the message shown before the
+   * request moves past it. Undefined when nothing is pinned or when the pool outside
+   * the pin is empty, because in both cases there is nothing to switch to.
+   */
+  describeSelectionExhaustion() {
+    return reportPinExhaustion(this.accounts, this.selection);
+  }
+  /** The pool as the selection policy sees it, for callers that render or report it. */
+  getSelectableAccounts() {
+    return eligibleAccounts(this.accounts, this.selection);
+  }
+  async persistSelection() {
+    if (this.accounts.length === 0) return;
+    try {
+      await saveAccounts(this.toStorage());
+    } catch (error) {
+      debugLogToFile(`[Account] Failed to persist account selection: ${String(error)}`);
     }
   }
   markRateLimitedWithReason(account, family, headerStyle, model, reason, retryAfterMs, failureTtlMs = 36e5) {
@@ -8983,9 +9142,19 @@ var AccountManager = class _AccountManager {
     return [...this.accounts];
   }
   async saveToDisk() {
+    await saveAccounts(this.toStorage());
+  }
+  /**
+   * The pool as it is on disk, rebuilt from this manager's state.
+   *
+   * One place builds it so the account fields and the selection cannot drift apart: the
+   * selection is written from the manager that owns it rather than left to whichever
+   * writer happened to touch the file last.
+   */
+  toStorage() {
     const claudeIndex = Math.max(0, this.currentAccountIndexByFamily.claude);
     const geminiIndex = Math.max(0, this.currentAccountIndexByFamily.gemini);
-    const storage = {
+    return {
       version: 4,
       accounts: this.accounts.map((a) => ({
         email: a.email,
@@ -9003,6 +9172,7 @@ var AccountManager = class _AccountManager {
         fingerprintHistory: a.fingerprintHistory?.length ? a.fingerprintHistory : void 0,
         cachedQuota: a.cachedQuota && Object.keys(a.cachedQuota).length > 0 ? a.cachedQuota : void 0,
         cachedQuotaUpdatedAt: a.cachedQuotaUpdatedAt,
+        tier: a.tier,
         verificationRequired: a.verificationRequired,
         verificationRequiredAt: a.verificationRequiredAt,
         verificationRequiredReason: a.verificationRequiredReason,
@@ -9012,9 +9182,9 @@ var AccountManager = class _AccountManager {
       activeIndexByFamily: {
         claude: claudeIndex,
         gemini: geminiIndex
-      }
+      },
+      selection: this.selection
     };
-    await saveAccounts(storage);
   }
   requestSaveToDisk() {
     if (this.savePending) {
@@ -9814,8 +9984,26 @@ function applyAccountUpdates(account, auth) {
     projectId: parts.projectId ?? account.projectId,
     managedProjectId: parts.managedProjectId ?? account.managedProjectId
   };
-  const changed = updated.refreshToken !== account.refreshToken || updated.projectId !== account.projectId || updated.managedProjectId !== account.managedProjectId;
+  const changed = updated.refreshToken !== account.refreshToken || updated.projectId !== account.projectId || updated.managedProjectId !== account.managedProjectId || updated.tier !== account.tier;
   return changed ? updated : void 0;
+}
+function classifyAccountTier(quota, subscription) {
+  let sawWindow = false;
+  let sawFiveHourWindow = false;
+  for (const group of Object.values(quota.groups)) {
+    for (const window of group?.windows ?? []) {
+      if (!window.resetTime) continue;
+      const resetAt = Date.parse(window.resetTime);
+      if (!Number.isFinite(resetAt)) continue;
+      sawWindow = true;
+      if (resetAt - Date.now() <= FIVE_HOUR_WINDOW_MS) {
+        sawFiveHourWindow = true;
+      }
+    }
+  }
+  if (sawFiveHourWindow) return "pro";
+  if (sawWindow) return "free";
+  return subscription ? "pro" : void 0;
 }
 var QUOTA_CONCURRENCY = 4;
 async function mapWithConcurrency(items, limit, worker) {
@@ -9876,14 +10064,17 @@ async function checkAccountQuota(account, index, client, providerId) {
           logQuotaStatus(account.email, index, (window.remainingFraction ?? 0) * 100, family);
         }
       }
+      const tier = classifyAccountTier(quotaResult, subscription);
+      const accountWithTier = tier && tier !== account.tier ? { ...updatedAccount ?? account, tier } : updatedAccount;
       return {
         index,
         email: account.email,
         status: "ok",
         disabled,
         quota: quotaResult,
-        updatedAccount,
-        ...subscription ? { subscription } : {}
+        updatedAccount: accountWithTier,
+        ...subscription ? { subscription } : {},
+        ...tier ? { tier } : {}
       };
     } catch (error) {
       logQuotaFetch("error", void 0, `account=${account.email ?? index} error=${error instanceof Error ? error.message : String(error)}`);
@@ -11092,6 +11283,7 @@ function formatWaitTime(ms) {
 }
 var FIRST_RETRY_DELAY_MS = 1e3;
 var SWITCH_ACCOUNT_DELAY_MS = 5e3;
+var MAX_REQUEST_ATTEMPTS = 50;
 var RATE_LIMIT_DEDUP_WINDOW_MS = 2e3;
 var RATE_LIMIT_STATE_RESET_MS = 12e4;
 var rateLimitStateByAccountQuota = /* @__PURE__ */ new Map();
@@ -11224,7 +11416,8 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
           error
         };
         const recovered = await sessionRecovery.handleSessionRecovery(messageInfo);
-        if (recovered && sessionID && config.auto_resume) {
+        const errorType = detectErrorType(error);
+        if (recovered && errorType === "tool_result_missing" && sessionID && config.auto_resume) {
           await client.session.prompt({
             path: { id: sessionID },
             body: { parts: [{ type: "text", text: config.resume_text }] },
@@ -11363,6 +11556,7 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
             let lastFailure = null;
             let lastError = null;
             const abortSignal = init?.signal ?? void 0;
+            let guardIterations = 0;
             const checkAborted = () => {
               if (abortSignal?.aborted) {
                 throw abortSignal.reason instanceof Error ? abortSignal.reason : new Error("Aborted");
@@ -11396,6 +11590,12 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
             };
             while (true) {
               checkAborted();
+              guardIterations++;
+              if (guardIterations > MAX_REQUEST_ATTEMPTS) {
+                throw new Error(
+                  `Antigravity gave up after ${MAX_REQUEST_ATTEMPTS} attempts without a usable account for ${family}.`
+                );
+              }
               const accountCount = accountManager.getAccountCount();
               const routingDecision = resolveHeaderRoutingDecision(urlString, family, config);
               const {
@@ -11435,6 +11635,34 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
                   pushDebug(
                     `selected-by-fallback idx=${account.index} preferred=${preferredHeaderStyle} alternate=${alternateHeaderStyle}`
                   );
+                }
+              }
+              if (!account && accountManager.hasSelection()) {
+                const exhaustion = accountManager.describeSelectionExhaustion();
+                if (exhaustion) {
+                  const selection = accountManager.getSelection();
+                  await showToast(
+                    pinExhaustedMessage(exhaustion, accountManager.getSelectableAccounts(), selection),
+                    "warning"
+                  );
+                  await accountManager.clearSelection();
+                  account = accountManager.getCurrentOrNextForFamily(
+                    family,
+                    model,
+                    config.account_selection_strategy,
+                    preferredHeaderStyle,
+                    config.pid_offset_enabled,
+                    config.soft_quota_threshold_percent,
+                    softQuotaCacheTtlMs
+                  );
+                  if (account) {
+                    const label = account.email || `Account ${account.index + 1}`;
+                    pushDebug(`selection-exhausted, widened to whole pool idx=${account.index} email=${label}`);
+                    await showToast(
+                      `Continuing with ${label}${account.tier === "free" ? " (free account)" : ""}.`,
+                      "info"
+                    );
+                  }
                 }
               }
               if (!account) {
@@ -13136,9 +13364,25 @@ var accountSchema = {
     error: { type: "string" },
     enabled: { type: "boolean" },
     subscription: { type: "object" },
+    // Absent until a quota reading has established it. Declared because the schema
+    // forbids extra properties, so an undeclared field is stripped from the response.
+    tier: { type: "string", enum: ["pro", "free"] },
     groups: { type: "array", items: quotaGroupSchema }
   },
   required: ["index", "status", "enabled", "groups"],
+  additionalProperties: false
+};
+var selectableAccountSchema = {
+  type: "object",
+  properties: {
+    index: { type: "number" },
+    email: { type: "string" },
+    tier: { type: "string", enum: ["pro", "free"] },
+    enabled: { type: "boolean" },
+    /** Whether this account is inside the current selection. */
+    selected: { type: "boolean" }
+  },
+  required: ["index", "enabled", "selected"],
   additionalProperties: false
 };
 var AntigravityRpc = Rpc.define({
@@ -13158,6 +13402,41 @@ var AntigravityRpc = Rpc.define({
           accounts: { type: "array", items: accountSchema }
         },
         required: ["available", "accounts"],
+        additionalProperties: false
+      }
+    },
+    /**
+     * Reads and changes which accounts requests may use.
+     *
+     * Separate from `quota` because the two answer different questions and have very
+     * different costs: reading the selection is a file read, while reading quota is a
+     * token refresh and two round trips per account. A menu that lists accounts to
+     * choose from should not be paying for a quota read on every keystroke.
+     */
+    selection: {
+      input: {
+        type: "object",
+        properties: {
+          /**
+           * Accounts to use, or empty to use every account.
+           *
+           * Absent reads the selection without changing it, which is how the same
+           * method serves both halves: a caller that only wants to look passes nothing.
+           */
+          emails: { type: "array", items: { type: "string" } }
+        },
+        additionalProperties: false
+      },
+      output: {
+        type: "object",
+        properties: {
+          accounts: { type: "array", items: selectableAccountSchema },
+          /** Empty when every account is eligible. */
+          pinnedEmails: { type: "array", items: { type: "string" } },
+          /** Emails named in the request that are not in the pool, and were dropped. */
+          unknown: { type: "array", items: { type: "string" } }
+        },
+        required: ["accounts", "pinnedEmails"],
         additionalProperties: false
       }
     }
@@ -13201,7 +13480,53 @@ function toAccount(result) {
     ...result.error ? { error: result.error } : {},
     enabled: result.disabled !== true,
     ...result.subscription ? { subscription: result.subscription } : {},
+    // Reported so a consumer can show paid and free apart without inferring it from the
+    // window shape, which is the same inference this handler would otherwise force on
+    // whoever is reading the output.
+    ...result.tier ? { tier: result.tier } : {},
     groups
+  };
+}
+function createAntigravitySelectionHandler() {
+  return async function selection(input2) {
+    const storage = await loadAccounts();
+    const accounts = storage?.accounts ?? [];
+    const requested = readRequestedEmails(input2);
+    if (requested === void 0) {
+      return toSelectionOutput(accounts, storage?.selection ?? { pinnedEmails: [] }, []);
+    }
+    const known = new Set(accounts.map((account) => account.email));
+    const cleaned = requested.map((email) => email.trim()).filter((email) => email.length > 0);
+    const unknown = cleaned.filter((email) => !known.has(email));
+    const pinnedEmails = [...new Set(cleaned.filter((email) => known.has(email)))].sort();
+    const next = { pinnedEmails };
+    if (storage) {
+      await saveAccounts({ ...storage, selection: next }).catch(() => {
+      });
+    }
+    return toSelectionOutput(accounts, next, unknown);
+  };
+}
+function readRequestedEmails(input2) {
+  if (typeof input2 !== "object" || input2 === null) return void 0;
+  const emails = input2.emails;
+  if (emails === void 0) return void 0;
+  if (!Array.isArray(emails)) return void 0;
+  return emails.filter((email) => typeof email === "string");
+}
+function toSelectionOutput(accounts, selection, unknown) {
+  const pinned = new Set(selection.pinnedEmails);
+  const positional = accounts.map((account, index) => ({ ...account, index }));
+  return {
+    accounts: eligibleAccounts(positional, selection).map((account) => ({
+      index: account.index,
+      ...account.email ? { email: account.email } : {},
+      ...account.tier ? { tier: account.tier } : {},
+      enabled: account.enabled !== false,
+      selected: account.email ? pinned.has(account.email) : false
+    })),
+    pinnedEmails: [...selection.pinnedEmails],
+    ...unknown.length > 0 ? { unknown } : {}
   };
 }
 function createAntigravityQuotaHandler(client) {
@@ -13245,7 +13570,8 @@ var AntigravityV2Plugin = Plugin.define({
     await registerOAuth(ctx, legacyPlugin, client);
     await registerModels(ctx);
     await ctx.rpc.register(AntigravityRpc, {
-      quota: createAntigravityQuotaHandler(client)
+      quota: createAntigravityQuotaHandler(client),
+      selection: createAntigravitySelectionHandler()
     });
     let fetchPromise;
     const proxy = await startAntigravityProxy(async () => {

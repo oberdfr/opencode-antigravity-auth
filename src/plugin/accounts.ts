@@ -8,6 +8,13 @@ import type { QuotaGroup, QuotaGroupSummary, QuotaWindowSummary } from "./quota"
 import { getModelFamily } from "./transform/model-resolver";
 import { debugLogToFile } from "./debug";
 import { formatAccountLabel } from "./logging-utils";
+import {
+  eligibleAccounts,
+  hasPin,
+  reportPinExhaustion,
+  type AccountSelection,
+  type AccountTier,
+} from "./selection";
 
 
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
@@ -149,6 +156,14 @@ export interface ManagedAccount {
   /** Cached quota data from last checkAccountsQuota() call */
   cachedQuota?: Partial<Record<QuotaGroup, QuotaGroupSummary>>;
   cachedQuotaUpdatedAt?: number;
+  /**
+   * Whether this account is on a paid plan, once the plugin has read it.
+   *
+   * Read from the subscription the project context reports. Absent until then, and the
+   * selection policy treats absent as paid so a paid account is never ranked below a
+   * free one on the strength of a missing field.
+   */
+  tier?: AccountTier;
   verificationRequired?: boolean;
   verificationRequiredAt?: number;
   verificationRequiredReason?: string;
@@ -337,6 +352,14 @@ export class AccountManager {
   };
   private lastToastAccountIndex = -1;
   private lastToastTime = 0;
+  /**
+   * Which accounts the user chose, or an empty pin for the whole pool.
+   *
+   * Held here rather than passed into each selection call because it is a property of
+   * the pool, not of one request: every caller wants the same answer, and threading it
+   * through each call site is how a path ends up quietly ignoring it.
+   */
+  private selection: AccountSelection = { pinnedEmails: [] };
 
   private savePending = false;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -392,6 +415,7 @@ export class AccountManager {
             fingerprintHistory: acc.fingerprintHistory ?? [],
             cachedQuota: acc.cachedQuota as Partial<Record<QuotaGroup, QuotaGroupSummary>> | undefined,
             cachedQuotaUpdatedAt: acc.cachedQuotaUpdatedAt,
+            tier: acc.tier,
             verificationRequired: acc.verificationRequired,
             verificationRequiredAt: acc.verificationRequiredAt,
             verificationRequiredReason: acc.verificationRequiredReason,
@@ -411,6 +435,10 @@ export class AccountManager {
       }
 
       this.cursor = clampNonNegativeInt(stored.activeIndex, 0);
+      // The pin is part of the pool as stored, so it is loaded here rather than passed
+      // in per request: every read of the pool already carries the user's choice, and
+      // a request cannot end up selecting an account the user excluded.
+      this.selection = stored.selection ?? { pinnedEmails: [] };
       if (this.accounts.length > 0) {
         this.cursor = this.cursor % this.accounts.length;
         const defaultIndex = this.cursor;
@@ -556,7 +584,10 @@ export class AccountManager {
       const healthTracker = getHealthTracker();
       const tokenTracker = getTokenTracker();
       
-      const accountsWithMetrics: AccountWithMetrics[] = this.accounts
+      // Paid-first, and inside the user's pin. The health and token scoring below is what
+      // balances load once the eligible set is fixed; neither is a substitute for the
+      // eligibility order, so both are applied here rather than in one of them.
+      const accountsWithMetrics: AccountWithMetrics[] = eligibleAccounts(this.accounts, this.selection)
         .filter(acc => acc.enabled !== false)
         .map(acc => {
           clearExpiredRateLimits(acc);
@@ -619,7 +650,7 @@ export class AccountManager {
   }
 
   getNextForFamily(family: ModelFamily, model?: string | null, headerStyle: HeaderStyle = "antigravity", softQuotaThresholdPercent: number = 100, softQuotaCacheTtlMs: number = 10 * 60 * 1000): ManagedAccount | null {
-    const available = this.accounts.filter((a) => {
+    const available = eligibleAccounts(this.accounts, this.selection).filter((a) => {
       clearExpiredRateLimits(a);
       return a.enabled !== false && 
              !isRateLimitedForHeaderStyle(a, family, headerStyle, model) && 
@@ -661,6 +692,99 @@ export class AccountManager {
     const account = this.accounts.find(a => a.index === accountIndex);
     if (account) {
       account.lastUsed = nowMs();
+    }
+  }
+
+  /** The accounts the user chose, or an empty pin for the whole pool. */
+  getSelection(): AccountSelection {
+    return { pinnedEmails: [...this.selection.pinnedEmails] };
+  }
+
+  /** Whether the pool is currently narrowed to specific accounts. */
+  hasSelection(): boolean {
+    return hasPin(this.selection);
+  }
+
+  /**
+   * Narrows the pool to the given accounts, or widens it back to all of them.
+   *
+   * Emails that are not in the pool are dropped rather than stored, so a selection
+   * naming a removed account does not leave a permanent hole in the pool that reads as
+   * "this account is excluded" with no way to tell it from a typo.
+   *
+   * Also resets the per-family cursors: they point into the old ordering, and leaving
+   * them would make the first request after a change land on an arbitrary account
+   * rather than the one the new selection puts first.
+   */
+  async setSelection(pinnedEmails: string[]): Promise<AccountSelection> {
+    const known = new Set(this.accounts.map((account) => account.email));
+    const wanted = new Set(pinnedEmails.map((email) => email.trim()).filter((email) => email.length > 0));
+
+    this.selection = {
+      pinnedEmails: [...wanted].filter((email) => known.has(email)).sort(),
+    };
+
+    this.currentAccountIndexByFamily.claude = -1;
+    this.currentAccountIndexByFamily.gemini = -1;
+    this.sessionOffsetApplied.claude = false;
+    this.sessionOffsetApplied.gemini = false;
+    this.cursor = 0;
+
+    await this.persistSelection();
+    return this.getSelection();
+  }
+
+  /**
+   * Widens the pool back to every account.
+   *
+   * Called when the pin has nothing usable left and the user has been told. The pin is
+   * not restored afterwards on purpose: leaving it in force would make the very next
+   * request widen itself again and re-send the same warning, once per request, for as
+   * long as the condition held. The widening is persisted so it survives the restart
+   * that a wedged session usually ends in.
+   */
+  async clearSelection(): Promise<AccountSelection> {
+    if (!hasPin(this.selection)) return this.getSelection();
+    this.selection = { pinnedEmails: [] };
+    this.currentAccountIndexByFamily.claude = -1;
+    this.currentAccountIndexByFamily.gemini = -1;
+    this.sessionOffsetApplied.claude = false;
+    this.sessionOffsetApplied.gemini = false;
+    this.cursor = 0;
+    await this.persistSelection();
+    return this.getSelection();
+  }
+
+  /**
+   * Describes a pin that has no usable account left, for the message shown before the
+   * request moves past it. Undefined when nothing is pinned or when the pool outside
+   * the pin is empty, because in both cases there is nothing to switch to.
+   */
+  describeSelectionExhaustion() {
+    return reportPinExhaustion(this.accounts, this.selection);
+  }
+
+  /** The pool as the selection policy sees it, for callers that render or report it. */
+  getSelectableAccounts() {
+    return eligibleAccounts(this.accounts, this.selection);
+  }
+
+  private async persistSelection(): Promise<void> {
+    // A manager with no accounts has no pool to write a selection into, and writing an
+    // empty one would replace a real pool with nothing.
+    if (this.accounts.length === 0) return;
+
+    try {
+      // Built from this manager rather than from a re-read of the file, so the selection
+      // is saved even when the manager was not itself loaded from disk. Reading the file
+      // first and writing that back would drop the change whenever the two disagreed,
+      // which is the case that matters.
+      await saveAccounts(this.toStorage());
+    } catch (error) {
+      // A selection that could not be saved still applies to this process, so it is a
+      // slower next start rather than a lost choice. Surfaced rather than swallowed so
+      // a disk problem is visible.
+      debugLogToFile(`[Account] Failed to persist account selection: ${String(error)}`);
     }
   }
 
@@ -1018,10 +1142,21 @@ export class AccountManager {
   }
 
   async saveToDisk(): Promise<void> {
+    await saveAccounts(this.toStorage());
+  }
+
+  /**
+   * The pool as it is on disk, rebuilt from this manager's state.
+   *
+   * One place builds it so the account fields and the selection cannot drift apart: the
+   * selection is written from the manager that owns it rather than left to whichever
+   * writer happened to touch the file last.
+   */
+  private toStorage(): AccountStorageV4 {
     const claudeIndex = Math.max(0, this.currentAccountIndexByFamily.claude);
     const geminiIndex = Math.max(0, this.currentAccountIndexByFamily.gemini);
-    
-    const storage: AccountStorageV4 = {
+
+    return {
       version: 4,
       accounts: this.accounts.map((a) => ({
         email: a.email,
@@ -1039,6 +1174,7 @@ export class AccountManager {
         fingerprintHistory: a.fingerprintHistory?.length ? a.fingerprintHistory : undefined,
         cachedQuota: a.cachedQuota && Object.keys(a.cachedQuota).length > 0 ? a.cachedQuota : undefined,
         cachedQuotaUpdatedAt: a.cachedQuotaUpdatedAt,
+        tier: a.tier,
         verificationRequired: a.verificationRequired,
         verificationRequiredAt: a.verificationRequiredAt,
         verificationRequiredReason: a.verificationRequiredReason,
@@ -1049,9 +1185,8 @@ export class AccountManager {
         claude: claudeIndex,
         gemini: geminiIndex,
       },
+      selection: this.selection,
     };
-
-    await saveAccounts(storage);
   }
 
   requestSaveToDisk(): void {

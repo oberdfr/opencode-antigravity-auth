@@ -268,6 +268,12 @@ function mergeAccountStorage(existing, incoming) {
         accounts: Array.from(accountMap.values()),
         activeIndex: incoming.activeIndex,
         activeIndexByFamily: incoming.activeIndexByFamily,
+        // The caller's selection wins when it says anything at all, and otherwise the
+        // stored one is kept. Most writers here are not selection-aware — the quota read
+        // refreshes managed project ids on its way past — and dropping the field on those
+        // writes would silently unpin whatever the user had chosen, the next time quota
+        // happened to be read.
+        selection: incoming.selection ?? existing.selection,
     };
 }
 export function deduplicateAccountsByEmail(accounts) {
@@ -479,6 +485,14 @@ export async function loadAccounts() {
             accounts: deduplicatedAccounts,
             activeIndex,
             activeIndexByFamily: storage.activeIndexByFamily,
+            // Carried through, because this function rebuilds the pool field by field and
+            // anything not named here is silently dropped. That is not cosmetic: the account
+            // manager and the selection RPC both read the pool through here, so a dropped
+            // field means the user's account selection is on disk and invisible at the same
+            // time — the pool looks unrestricted while the stored choice says otherwise.
+            // The stored value is preferred over the in-memory one so a legacy file that
+            // predates the field still yields an empty selection rather than undefined.
+            selection: storage.selection ?? { pinnedEmails: [] },
         };
     }
     catch (error) {

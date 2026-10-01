@@ -290,6 +290,22 @@ async function resumeSession(
 // Toast Messages
 // =============================================================================
 
+/**
+ * How many repairs one session gets inside ATTEMPT_WINDOW_MS before recovery stops
+ * touching it.
+ *
+ * Three is enough for the case recovery exists for: the model emitted a tool call
+ * without its result once, a second time after the inject, and a third because the
+ * fix did not take. Past that the fault is in the conversation, and re-prompting only
+ * adds load to a session that is already failing.
+ */
+const MAX_RECOVERY_ATTEMPTS = 3;
+/** How long a session's spent budget stays spent. Long enough to cover one fix, short
+ * enough that a session fixed later in the day is not permanently marked. */
+const ATTEMPT_WINDOW_MS = 60_000;
+/** Upper bound on remembered sessions, so a long-lived server cannot accumulate them. */
+const MAX_TRACKED_SESSIONS = 200;
+
 const TOAST_TITLES: Record<string, string> = {
   tool_result_missing: "Tool Crash Recovery",
   thinking_block_order: "Thinking Block Recovery",
@@ -384,6 +400,14 @@ export function createSessionRecoveryHook(
 
   const { client, directory } = ctx;
   const processingErrors = new Set<string>();
+  // Recovery is a repair, and a repair that keeps firing on the same session is not a
+  // repair. `processingErrors` only guards the message being handled right now, and it
+  // is cleared in the finally block, so a fault that comes back on a fresh message id
+  // every time was never stopped by it: each cycle re-prompted, the prompt re-ran the
+  // model, and the session burned a core until OpenCode was killed. Counting per
+  // session gives the repair a budget, and the window lets a session that genuinely
+  // recovered start earning it again.
+  const attemptsBySession = new Map<string, { count: number; windowStart: number }>();
   let onAbortCallback: ((sessionID: string) => void) | null = null;
   let onRecoveryCompleteCallback: ((sessionID: string) => void) | null = null;
 
@@ -404,6 +428,34 @@ export function createSessionRecoveryHook(
 
     const sessionID = info.sessionID;
     if (!sessionID) return false;
+
+    // Claim budget before touching the session. Aborting a live request is
+    // disruptive, so a session that has already spent its budget is left alone
+    // rather than interrupted only to be abandoned.
+    const attempt = attemptsBySession.get(sessionID);
+    const now = Date.now();
+    if (attempt && now - attempt.windowStart < ATTEMPT_WINDOW_MS) {
+      if (attempt.count >= MAX_RECOVERY_ATTEMPTS) {
+        createLogger("session-recovery").warn("Recovery budget spent; not retrying", {
+          sessionID,
+          errorType,
+          attempts: attempt.count,
+        });
+        return false;
+      }
+      attempt.count++;
+    } else {
+      attemptsBySession.set(sessionID, { count: 1, windowStart: now });
+    }
+
+    // The map is keyed by session and OpenCode keeps sessions around, so let it
+    // forget the ones that have been quiet rather than growing for the life of the
+    // server.
+    if (attemptsBySession.size > MAX_TRACKED_SESSIONS) {
+      for (const [key, entry] of attemptsBySession) {
+        if (now - entry.windowStart >= ATTEMPT_WINDOW_MS) attemptsBySession.delete(key);
+      }
+    }
 
     // OpenCode's session.error event may not include messageID
     // In that case, we need to fetch messages and find the latest assistant with error

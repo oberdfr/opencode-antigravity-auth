@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
 import lockfile from "proper-lockfile";
 import type { HeaderStyle } from "../constants";
+import type { AccountSelection, AccountTier } from "./selection";
 import { createLogger } from "./logger";
 
 const log = createLogger("storage");
@@ -202,6 +203,14 @@ export interface AccountMetadataV3 {
   /** Cached soft quota data */
   cachedQuota?: Record<string, { remainingFraction?: number; resetTime?: string; modelCount: number }>;
   cachedQuotaUpdatedAt?: number;
+  /**
+   * Whether this account is on a paid plan.
+   *
+   * Read from the subscription the project context reports, and used to spend paid
+   * allowances before free ones. Absent means it has not been established yet, which
+   * the selection policy treats as paid rather than demoting an account on a guess.
+   */
+  tier?: AccountTier;
 }
 
 export interface AccountStorageV3 {
@@ -222,6 +231,14 @@ export interface AccountStorageV4 {
     claude?: number;
     gemini?: number;
   };
+  /**
+   * Which accounts the user chose, when they chose specific ones.
+   *
+   * Absent or empty means every account is eligible, which is the behaviour before
+   * anyone narrows the pool. Stored at the top level rather than per account because
+   * it is a statement about the pool, not about any one account in it.
+   */
+  selection?: AccountSelection;
 }
 
 type AnyAccountStorage =
@@ -438,6 +455,12 @@ function mergeAccountStorage(
     accounts: Array.from(accountMap.values()),
     activeIndex: incoming.activeIndex,
     activeIndexByFamily: incoming.activeIndexByFamily,
+    // The caller's selection wins when it says anything at all, and otherwise the
+    // stored one is kept. Most writers here are not selection-aware — the quota read
+    // refreshes managed project ids on its way past — and dropping the field on those
+    // writes would silently unpin whatever the user had chosen, the next time quota
+    // happened to be read.
+    selection: incoming.selection ?? existing.selection,
   };
 }
 
@@ -679,6 +702,14 @@ export async function loadAccounts(): Promise<AccountStorageV4 | null> {
       accounts: deduplicatedAccounts,
       activeIndex,
       activeIndexByFamily: storage.activeIndexByFamily,
+      // Carried through, because this function rebuilds the pool field by field and
+      // anything not named here is silently dropped. That is not cosmetic: the account
+      // manager and the selection RPC both read the pool through here, so a dropped
+      // field means the user's account selection is on disk and invisible at the same
+      // time — the pool looks unrestricted while the stored choice says otherwise.
+      // The stored value is preferred over the in-memory one so a legacy file that
+      // predates the field still yields an empty selection rather than undefined.
+      selection: (storage as AccountStorageV4).selection ?? { pinnedEmails: [] },
     };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

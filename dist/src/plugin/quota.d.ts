@@ -1,5 +1,6 @@
 import type { PluginClient } from "./types";
 import type { AccountMetadataV3 } from "./storage";
+import type { AccountTier } from "./selection";
 export type QuotaGroup = "claude" | "gemini-pro" | "gemini-flash";
 /**
  * One window of an allowance.
@@ -38,6 +39,13 @@ export interface AccountQuotaResult {
         id: string;
         name?: string;
     };
+    /**
+     * The plan tier read off this reading, when it could be read.
+     *
+     * Absent rather than false when the reading did not say, so a failed fetch cannot be
+     * mistaken for a free account and put it last in the rotation.
+     */
+    tier?: AccountTier;
 }
 export declare function checkAccountsQuota(accounts: AccountMetadataV3[], client: PluginClient, providerId?: string): Promise<AccountQuotaResult[]>;
 declare function checkAccountQuota(account: AccountMetadataV3, index: number, client: PluginClient, providerId: string): Promise<AccountQuotaResult>;

@@ -3,6 +3,7 @@ import type { OAuthAuthDetails, RefreshParts } from "./types";
 import type { AccountSelectionStrategy } from "./config/schema";
 import { type Fingerprint, type FingerprintVersion } from "./fingerprint";
 import type { QuotaGroup, QuotaGroupSummary } from "./quota";
+import { type AccountSelection, type AccountTier } from "./selection";
 export type { ModelFamily, HeaderStyle, CooldownReason } from "./storage";
 export type { AccountSelectionStrategy } from "./config/schema";
 export type RateLimitReason = "QUOTA_EXHAUSTED" | "RATE_LIMIT_EXCEEDED" | "MODEL_CAPACITY_EXHAUSTED" | "SERVER_ERROR" | "UNKNOWN";
@@ -38,6 +39,14 @@ export interface ManagedAccount {
     /** Cached quota data from last checkAccountsQuota() call */
     cachedQuota?: Partial<Record<QuotaGroup, QuotaGroupSummary>>;
     cachedQuotaUpdatedAt?: number;
+    /**
+     * Whether this account is on a paid plan, once the plugin has read it.
+     *
+     * Read from the subscription the project context reports. Absent until then, and the
+     * selection policy treats absent as paid so a paid account is never ranked below a
+     * free one on the strength of a missing field.
+     */
+    tier?: AccountTier;
     verificationRequired?: boolean;
     verificationRequiredAt?: number;
     verificationRequiredReason?: string;
@@ -73,6 +82,14 @@ export declare class AccountManager {
     private sessionOffsetApplied;
     private lastToastAccountIndex;
     private lastToastTime;
+    /**
+     * Which accounts the user chose, or an empty pin for the whole pool.
+     *
+     * Held here rather than passed into each selection call because it is a property of
+     * the pool, not of one request: every caller wants the same answer, and threading it
+     * through each call site is how a path ends up quietly ignoring it.
+     */
+    private selection;
     private savePending;
     private saveTimeout;
     private savePromiseResolvers;
@@ -99,6 +116,41 @@ export declare class AccountManager {
      * Should be called AFTER request completion, not during account selection.
      */
     markAccountUsed(accountIndex: number): void;
+    /** The accounts the user chose, or an empty pin for the whole pool. */
+    getSelection(): AccountSelection;
+    /** Whether the pool is currently narrowed to specific accounts. */
+    hasSelection(): boolean;
+    /**
+     * Narrows the pool to the given accounts, or widens it back to all of them.
+     *
+     * Emails that are not in the pool are dropped rather than stored, so a selection
+     * naming a removed account does not leave a permanent hole in the pool that reads as
+     * "this account is excluded" with no way to tell it from a typo.
+     *
+     * Also resets the per-family cursors: they point into the old ordering, and leaving
+     * them would make the first request after a change land on an arbitrary account
+     * rather than the one the new selection puts first.
+     */
+    setSelection(pinnedEmails: string[]): Promise<AccountSelection>;
+    /**
+     * Widens the pool back to every account.
+     *
+     * Called when the pin has nothing usable left and the user has been told. The pin is
+     * not restored afterwards on purpose: leaving it in force would make the very next
+     * request widen itself again and re-send the same warning, once per request, for as
+     * long as the condition held. The widening is persisted so it survives the restart
+     * that a wedged session usually ends in.
+     */
+    clearSelection(): Promise<AccountSelection>;
+    /**
+     * Describes a pin that has no usable account left, for the message shown before the
+     * request moves past it. Undefined when nothing is pinned or when the pool outside
+     * the pin is empty, because in both cases there is nothing to switch to.
+     */
+    describeSelectionExhaustion(): import("./selection").ExhaustionReport | undefined;
+    /** The pool as the selection policy sees it, for callers that render or report it. */
+    getSelectableAccounts(): ManagedAccount[];
+    private persistSelection;
     markRateLimitedWithReason(account: ManagedAccount, family: ModelFamily, headerStyle: HeaderStyle, model: string | null | undefined, reason: RateLimitReason, retryAfterMs?: number | null, failureTtlMs?: number): number;
     markRequestSuccess(account: ManagedAccount): void;
     clearAllRateLimitsForFamily(family: ModelFamily, model?: string | null): void;
@@ -135,6 +187,14 @@ export declare class AccountManager {
     getMinWaitTimeForFamily(family: ModelFamily, model?: string | null, headerStyle?: HeaderStyle, strict?: boolean): number;
     getAccounts(): ManagedAccount[];
     saveToDisk(): Promise<void>;
+    /**
+     * The pool as it is on disk, rebuilt from this manager's state.
+     *
+     * One place builds it so the account fields and the selection cannot drift apart: the
+     * selection is written from the manager that owns it rather than left to whichever
+     * writer happened to touch the file last.
+     */
+    private toStorage;
     requestSaveToDisk(): void;
     flushSaveToDisk(): Promise<void>;
     private executeSave;

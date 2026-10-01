@@ -10,6 +10,15 @@ function hashString(str) {
     }
     return (hash >>> 0).toString(16);
 }
+/**
+ * Most thinking texts worth remembering to suppress.
+ *
+ * The set is scoped to one response, so this is not a lifetime budget and a normal
+ * response never reaches it. It exists so a single runaway stream degrades into
+ * slightly more repeated text rather than into unbounded memory: past the cap the
+ * set stops growing and the prefix check below keeps doing the work that matters.
+ */
+const MAX_DISPLAYED_THINKING_HASHES = 4096;
 export function createThoughtBuffer() {
     const buffer = new Map();
     return {
@@ -70,15 +79,12 @@ export function deduplicateThinkingText(response, sentBuffer, displayedThinkingH
                 }
                 if (p.thought === true || p.type === 'thinking') {
                     const fullText = (p.text || p.thinking || '');
-                    if (displayedThinkingHashes) {
-                        const hash = hashString(fullText);
-                        if (displayedThinkingHashes.has(hash)) {
-                            sentBuffer.set(index, fullText);
-                            return null;
-                        }
-                        displayedThinkingHashes.add(hash);
-                    }
                     const sentText = sentBuffer.get(index) ?? '';
+                    // The prefix test comes first because it is the cheap one, and because on a
+                    // cumulative stream it is the one that always applies. Hashing first meant
+                    // walking the entire accumulated text on every chunk, which is quadratic in
+                    // how much the model has thought and showed up as a pinned core on long
+                    // Gemini 3 responses.
                     if (fullText.startsWith(sentText)) {
                         const delta = fullText.slice(sentText.length);
                         sentBuffer.set(index, fullText);
@@ -86,6 +92,19 @@ export function deduplicateThinkingText(response, sentBuffer, displayedThinkingH
                             return { ...p, text: delta, thinking: delta };
                         }
                         return null;
+                    }
+                    // Not a continuation, so this is text the buffer has not already forwarded.
+                    // An exact repeat is caught by the prefix test above, so reaching here with
+                    // a hash already recorded means the same text came back out of order.
+                    if (displayedThinkingHashes) {
+                        const hash = hashString(fullText);
+                        if (displayedThinkingHashes.has(hash)) {
+                            sentBuffer.set(index, fullText);
+                            return null;
+                        }
+                        if (displayedThinkingHashes.size < MAX_DISPLAYED_THINKING_HASHES) {
+                            displayedThinkingHashes.add(hash);
+                        }
                     }
                     sentBuffer.set(index, fullText);
                     return part;
@@ -106,16 +125,9 @@ export function deduplicateThinkingText(response, sentBuffer, displayedThinkingH
             const b = block;
             if (b?.type === 'thinking') {
                 const fullText = (b.thinking || b.text || '');
-                if (displayedThinkingHashes) {
-                    const hash = hashString(fullText);
-                    if (displayedThinkingHashes.has(hash)) {
-                        sentBuffer.set(thinkingIndex, fullText);
-                        thinkingIndex++;
-                        return null;
-                    }
-                    displayedThinkingHashes.add(hash);
-                }
                 const sentText = sentBuffer.get(thinkingIndex) ?? '';
+                // Same order as the candidates branch: cheap prefix test first, hash only for
+                // text that is not a continuation of what was already forwarded.
                 if (fullText.startsWith(sentText)) {
                     const delta = fullText.slice(sentText.length);
                     sentBuffer.set(thinkingIndex, fullText);
@@ -124,6 +136,17 @@ export function deduplicateThinkingText(response, sentBuffer, displayedThinkingH
                         return { ...b, thinking: delta, text: delta };
                     }
                     return null;
+                }
+                if (displayedThinkingHashes) {
+                    const hash = hashString(fullText);
+                    if (displayedThinkingHashes.has(hash)) {
+                        sentBuffer.set(thinkingIndex, fullText);
+                        thinkingIndex++;
+                        return null;
+                    }
+                    if (displayedThinkingHashes.size < MAX_DISPLAYED_THINKING_HASHES) {
+                        displayedThinkingHashes.add(hash);
+                    }
                 }
                 sentBuffer.set(thinkingIndex, fullText);
                 thinkingIndex++;

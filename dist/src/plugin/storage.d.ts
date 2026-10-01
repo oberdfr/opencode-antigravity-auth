@@ -1,4 +1,5 @@
 import type { HeaderStyle } from "../constants";
+import type { AccountSelection, AccountTier } from "./selection";
 /**
  * Files/directories that should be gitignored in the config directory.
  * These contain sensitive data or machine-specific state.
@@ -85,6 +86,14 @@ export interface AccountMetadataV3 {
         modelCount: number;
     }>;
     cachedQuotaUpdatedAt?: number;
+    /**
+     * Whether this account is on a paid plan.
+     *
+     * Read from the subscription the project context reports, and used to spend paid
+     * allowances before free ones. Absent means it has not been established yet, which
+     * the selection policy treats as paid rather than demoting an account on a guess.
+     */
+    tier?: AccountTier;
 }
 export interface AccountStorageV3 {
     version: 3;
@@ -103,6 +112,14 @@ export interface AccountStorageV4 {
         claude?: number;
         gemini?: number;
     };
+    /**
+     * Which accounts the user chose, when they chose specific ones.
+     *
+     * Absent or empty means every account is eligible, which is the behaviour before
+     * anyone narrows the pool. Stored at the top level rather than per account because
+     * it is a statement about the pool, not about any one account in it.
+     */
+    selection?: AccountSelection;
 }
 /**
  * Gets the config directory path, with the following precedence:

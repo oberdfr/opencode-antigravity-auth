@@ -260,8 +260,46 @@ function applyAccountUpdates(account, auth) {
     };
     const changed = updated.refreshToken !== account.refreshToken ||
         updated.projectId !== account.projectId ||
-        updated.managedProjectId !== account.managedProjectId;
+        updated.managedProjectId !== account.managedProjectId ||
+        updated.tier !== account.tier;
     return changed ? updated : undefined;
+}
+/**
+ * Reads an account's plan tier off the quota reading.
+ *
+ * The buckets are the signal rather than the subscription field, because the buckets
+ * are the thing being acted on: a paid plan runs a five-hour window alongside the
+ * weekly one, and a free plan reports the weekly window alone. Deriving the tier from
+ * what the account actually has means it stays right even when the subscription field
+ * is absent or reports something the user did not expect.
+ *
+ * The subscription is used only to break a tie, for an account whose reading came back
+ * with no usable window at all and so says nothing either way.
+ *
+ * Returns undefined when the reading cannot decide, so an account is never written
+ * down as free on the strength of a failed or empty read.
+ */
+function classifyAccountTier(quota, subscription) {
+    let sawWindow = false;
+    let sawFiveHourWindow = false;
+    for (const group of Object.values(quota.groups)) {
+        for (const window of group?.windows ?? []) {
+            if (!window.resetTime)
+                continue;
+            const resetAt = Date.parse(window.resetTime);
+            if (!Number.isFinite(resetAt))
+                continue;
+            sawWindow = true;
+            if (resetAt - Date.now() <= FIVE_HOUR_WINDOW_MS) {
+                sawFiveHourWindow = true;
+            }
+        }
+    }
+    if (sawFiveHourWindow)
+        return "pro";
+    if (sawWindow)
+        return "free";
+    return subscription ? "pro" : undefined;
 }
 /**
  * How many accounts to check at once.
@@ -328,14 +366,22 @@ async function checkAccountQuota(account, index, client, providerId) {
                     logQuotaStatus(account.email, index, (window.remainingFraction ?? 0) * 100, family);
                 }
             }
+            // Now that the reading is in, the account's tier is known. Recorded here rather
+            // than on first login because the login path has no reading to learn it from, and
+            // because this is the read that runs anyway on a schedule.
+            const tier = classifyAccountTier(quotaResult, subscription);
+            const accountWithTier = tier && tier !== account.tier
+                ? { ...(updatedAccount ?? account), tier }
+                : updatedAccount;
             return {
                 index,
                 email: account.email,
                 status: "ok",
                 disabled,
                 quota: quotaResult,
-                updatedAccount,
+                updatedAccount: accountWithTier,
                 ...(subscription ? { subscription } : {}),
+                ...(tier ? { tier } : {}),
             };
         }
         catch (error) {
