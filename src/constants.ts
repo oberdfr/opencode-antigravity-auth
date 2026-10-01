@@ -27,29 +27,25 @@ export const ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
 /**
  * Root endpoints for the Antigravity API (in fallback order).
  *
- * The sandbox hosts lead, which is the order CLIProxy and Vibeproxy use and the one
- * these accounts are licensed for: the production hosts answer `SUBSCRIPTION_REQUIRED`
- * for them, and a request that dies on a licence is not a request worth retrying
- * elsewhere for long.
- *
- * The production hosts stay in the list, so an account that is entitled to them can
- * still reach them once the sandbox hosts have failed.
+ * The first entry is the host the real client talks to, and the one that serves the
+ * per-tier Flash models; the sandbox hosts answer 404 for those names and stay in the
+ * list as fallbacks, in the order CLIProxy and Vibeproxy use.
  */
-export const ANTIGRAVITY_ENDPOINT_DAILY =
+export const ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.googleapis.com";
+export const ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX =
   "https://daily-cloudcode-pa.sandbox.googleapis.com";
-export const ANTIGRAVITY_ENDPOINT_DAILY_PROD = "https://daily-cloudcode-pa.googleapis.com";
 export const ANTIGRAVITY_ENDPOINT_AUTOPUSH =
   "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 export const ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com";
 
 /**
- * Endpoint fallback order (daily sandbox → autopush → daily prod → prod).
+ * Endpoint fallback order (daily → daily sandbox → autopush → prod).
  * Shared across request handling and project discovery to mirror CLIProxy behavior.
  */
 export const ANTIGRAVITY_ENDPOINT_FALLBACKS = [
   ANTIGRAVITY_ENDPOINT_DAILY,
+  ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX,
   ANTIGRAVITY_ENDPOINT_AUTOPUSH,
-  ANTIGRAVITY_ENDPOINT_DAILY_PROD,
   ANTIGRAVITY_ENDPOINT_PROD,
 ] as const;
 

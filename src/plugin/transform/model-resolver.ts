@@ -247,19 +247,18 @@ export function resolveModelWithTier(requestedModel: string, options: ModelResol
   const isGemini3 = modelWithoutQuota.toLowerCase().startsWith("gemini-3");
   const skipAlias = isAntigravity && isGemini3;
 
-  // 3.6/3.7/3.8 Flash: always resolve to -tiered + thinkingLevel.
+  // 3.6/3.7/3.8 Flash: resolve to the sku that names the requested level.
   // Do this before skipAlias so antigravity-gemini-3.7-flash-medium works too.
   //
-  // The per-tier skus (flash-low/medium/high) are what the IDE client asks for, and they
-  // are served only from the production hosts — which these accounts are not licensed
-  // for. On the sandbox hosts they come back 404, so the tiered name is what the level
-  // travels on here. The level still comes from the request rather than from the model
-  // name, because the catalog carries one model per family.
+  // The level travels twice — on the sku and on generationConfig — and both have to agree
+  // with what was asked for, or the gateway is asked for reasoning it was not asked to
+  // produce. The level comes from the request rather than from the model name, because the
+  // catalog carries one model per family and the id has no suffix on it.
   if (isTieredFlashModel(baseName) && quotaPreference === "antigravity" && !isImageModel) {
     const flashBase = baseName.replace(/-tiered$/i, "");
     const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
     return {
-      actualModel: `${flashBase}-tiered`,
+      actualModel: `${flashBase}-${level}`,
       thinkingLevel: level,
       tier: level,
       isThinkingModel: true,

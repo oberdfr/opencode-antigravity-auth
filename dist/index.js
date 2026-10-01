@@ -20,14 +20,14 @@ var ANTIGRAVITY_SCOPES = [
   "https://www.googleapis.com/auth/experimentsandconfigs"
 ];
 var ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
-var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-var ANTIGRAVITY_ENDPOINT_DAILY_PROD = "https://daily-cloudcode-pa.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_AUTOPUSH = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_FALLBACKS = [
   ANTIGRAVITY_ENDPOINT_DAILY,
+  ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX,
   ANTIGRAVITY_ENDPOINT_AUTOPUSH,
-  ANTIGRAVITY_ENDPOINT_DAILY_PROD,
   ANTIGRAVITY_ENDPOINT_PROD
 ];
 var ANTIGRAVITY_LOAD_ENDPOINTS = [
@@ -5892,7 +5892,7 @@ function resolveModelWithTier(requestedModel, options = {}) {
     const flashBase = baseName.replace(/-tiered$/i, "");
     const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
     return {
-      actualModel: `${flashBase}-tiered`,
+      actualModel: `${flashBase}-${level}`,
       thinkingLevel: level,
       tier: level,
       isThinkingModel: true,
@@ -6541,13 +6541,71 @@ function antigravityIdentity(conversation, isClaude, lastExecutionId) {
 
 // src/plugin/fingerprint.ts
 import * as crypto from "node:crypto";
+
+// src/plugin/hub-version.ts
+var ANTIGRAVITY_HUB_VERSION_FALLBACK = "2.8.0";
+var ANTIGRAVITY_HUB_VERSION_FLOOR = "2.8.0";
+var HUB_MANIFEST_URL = "https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
+var HUB_MANIFEST_TIMEOUT_MS = 5e3;
+var HUB_CLIENT_BUILD = "963137146";
+var HUB_OS = "darwin";
+var HUB_ARCH = "arm64";
+var hubVersion = ANTIGRAVITY_HUB_VERSION_FALLBACK;
+var hubVersionFetch = null;
+var logger = () => createLogger("hub-version");
+function parseHubManifestVersion(yamlText) {
+  for (const line of yamlText.split(/\r?\n/)) {
+    const match = /^\s*version\s*:\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))\s*(?:#.*)?$/.exec(line);
+    if (!match) continue;
+    const version = (match[1] ?? match[2] ?? match[3] ?? "").trim();
+    return /^\d+\.\d+\.\d+$/.test(version) ? version : null;
+  }
+  return null;
+}
+function isAtLeastHubVersionFloor(version) {
+  const parse = (value) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const [a, b] = [parse(version), parse(ANTIGRAVITY_HUB_VERSION_FLOOR)];
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    const left = a[index] ?? 0;
+    const right = b[index] ?? 0;
+    if (left !== right) return left > right;
+  }
+  return true;
+}
+async function ensureAntigravityHubVersion() {
+  if (hubVersionFetch) return hubVersionFetch;
+  hubVersionFetch = (async () => {
+    try {
+      const response = await fetch(HUB_MANIFEST_URL, {
+        headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
+        signal: AbortSignal.timeout(HUB_MANIFEST_TIMEOUT_MS)
+      });
+      if (!response.ok) return;
+      const discovered = parseHubManifestVersion(await response.text());
+      if (discovered && isAtLeastHubVersionFloor(discovered) && discovered !== hubVersion) {
+        logger().info("version-discovered", { from: hubVersion, to: discovered });
+        hubVersion = discovered;
+      }
+    } catch (error) {
+      logger().info("version-unavailable", {
+        using: hubVersion,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+    }
+  })();
+  return hubVersionFetch;
+}
+function getAntigravityHubUserAgent() {
+  return `antigravity/hub/${hubVersion} (aidev_client; os_type=${HUB_OS}; arch=${HUB_ARCH}; cl=${HUB_CLIENT_BUILD})`;
+}
+
+// src/plugin/fingerprint.ts
 var OS_VERSIONS = {
   darwin: ["10.15.7", "11.6.8", "12.6.3", "13.5.2", "14.2.1", "14.5"],
   win32: ["10.0.19041", "10.0.19042", "10.0.19043", "10.0.22000", "10.0.22621", "10.0.22631"],
   linux: ["5.15.0", "5.19.0", "6.1.0", "6.2.0", "6.5.0", "6.6.0"]
 };
 var ARCHITECTURES = ["x64", "arm64"];
-var CLIENT_MARKER = "aidev_client";
 var IDE_TYPES = [
   "ANTIGRAVITY"
 ];
@@ -6578,7 +6636,7 @@ function generateFingerprint() {
   return {
     deviceId: generateDeviceId(),
     sessionToken: generateSessionToken(),
-    userAgent: antigravityUserAgent(platform, arch),
+    userAgent: getAntigravityHubUserAgent(),
     apiClient: randomFrom2(SDK_CLIENTS),
     clientMetadata: {
       ideType: randomFrom2(IDE_TYPES),
@@ -6587,27 +6645,6 @@ function generateFingerprint() {
     },
     createdAt: Date.now()
   };
-}
-function antigravityUserAgent(platform, arch) {
-  return `antigravity/${getAntigravityVersion()} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${Math.floor(1e8 + Math.random() * 9e8)})`;
-}
-function antigravityUserAgentFor(fingerprint) {
-  if (fingerprint.userAgent.includes(CLIENT_MARKER)) {
-    return fingerprint.userAgent;
-  }
-  const legacy = fingerprint.userAgent.match(/^antigravity\/[\d.]+\s+([\w.-]+)\/([\w.-]+)$/);
-  const platform = legacy?.[1] ?? "linux";
-  const arch = legacy?.[2] ?? "x64";
-  const version = fingerprint.userAgent.match(/^antigravity\/([\d.]+)/)?.[1] ?? getAntigravityVersion();
-  return `antigravity/${version} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${clientBuildFrom(fingerprint)})`;
-}
-function clientBuildFrom(fingerprint) {
-  let hash = 0;
-  const seed = `${fingerprint.deviceId}:${fingerprint.sessionToken}`;
-  for (let index = 0; index < seed.length; index++) {
-    hash = hash * 31 + seed.charCodeAt(index) >>> 0;
-  }
-  return 1e8 + hash % 9e8;
 }
 function updateFingerprintVersion(fingerprint) {
   const currentVersion = getAntigravityVersion();
@@ -6624,11 +6661,12 @@ function buildFingerprintHeaders(fingerprint) {
     return {};
   }
   return {
-    // Derived rather than read straight off the fingerprint, so an account saved before
-    // the client marker existed is still recognised as the IDE client. The stored string
-    // is left alone: the fingerprint is the account's identity, and rewriting it to suit
-    // a header would change what every later request sends.
-    "User-Agent": antigravityUserAgentFor(fingerprint)
+    // Built here rather than read off the fingerprint, because the version in it is the
+    // hub's and is resolved at runtime from the hub's manifest. A fingerprint stored
+    // before this was true would keep sending a version the gateway refuses, and the
+    // refusal reads as a licensing problem rather than the stale header it is. The stored
+    // string is left alone: the fingerprint is the account's identity.
+    "User-Agent": getAntigravityHubUserAgent()
   };
 }
 var sessionFingerprint = null;
@@ -11545,7 +11583,7 @@ var createAntigravityPlugin = (providerId) => async ({ client, directory }) => {
   let cachedGetAuth = null;
   initializeDebug(config);
   initLogger(client);
-  await initAntigravityVersion();
+  await Promise.all([initAntigravityVersion(), ensureAntigravityHubVersion()]);
   if (config.health_score) {
     initHealthTracker({
       initial: config.health_score.initial,

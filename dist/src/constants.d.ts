@@ -17,32 +17,28 @@ export declare const ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-ca
 /**
  * Root endpoints for the Antigravity API (in fallback order).
  *
- * The sandbox hosts lead, which is the order CLIProxy and Vibeproxy use and the one
- * these accounts are licensed for: the production hosts answer `SUBSCRIPTION_REQUIRED`
- * for them, and a request that dies on a licence is not a request worth retrying
- * elsewhere for long.
- *
- * The production hosts stay in the list, so an account that is entitled to them can
- * still reach them once the sandbox hosts have failed.
+ * The first entry is the host the real client talks to, and the one that serves the
+ * per-tier Flash models; the sandbox hosts answer 404 for those names and stay in the
+ * list as fallbacks, in the order CLIProxy and Vibeproxy use.
  */
-export declare const ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.sandbox.googleapis.com";
-export declare const ANTIGRAVITY_ENDPOINT_DAILY_PROD = "https://daily-cloudcode-pa.googleapis.com";
+export declare const ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.googleapis.com";
+export declare const ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 export declare const ANTIGRAVITY_ENDPOINT_AUTOPUSH = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 export declare const ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com";
 /**
- * Endpoint fallback order (daily sandbox → autopush → daily prod → prod).
+ * Endpoint fallback order (daily → daily sandbox → autopush → prod).
  * Shared across request handling and project discovery to mirror CLIProxy behavior.
  */
-export declare const ANTIGRAVITY_ENDPOINT_FALLBACKS: readonly ["https://daily-cloudcode-pa.sandbox.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com", "https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"];
+export declare const ANTIGRAVITY_ENDPOINT_FALLBACKS: readonly ["https://daily-cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.sandbox.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com", "https://cloudcode-pa.googleapis.com"];
 /**
  * Preferred endpoint order for project discovery (prod first, then fallbacks).
  * loadCodeAssist appears to be best supported on prod for managed project resolution.
  */
-export declare const ANTIGRAVITY_LOAD_ENDPOINTS: readonly ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.sandbox.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com"];
+export declare const ANTIGRAVITY_LOAD_ENDPOINTS: readonly ["https://cloudcode-pa.googleapis.com", "https://daily-cloudcode-pa.googleapis.com", "https://autopush-cloudcode-pa.sandbox.googleapis.com"];
 /**
  * Primary endpoint to use (daily sandbox - same as CLIProxy/Vibeproxy).
  */
-export declare const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+export declare const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 /**
  * Gemini CLI endpoint (production).
  * Used for models without :antigravity suffix.

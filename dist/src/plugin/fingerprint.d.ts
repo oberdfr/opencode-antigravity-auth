@@ -47,22 +47,6 @@ export declare function generateFingerprint(): Fingerprint;
  */
 export declare function collectCurrentFingerprint(): Fingerprint;
 /**
- * The user agent in the shape the real Antigravity client sends, derived from whatever
- * the fingerprint already carries.
- *
- * The per-tier Flash models are served to the IDE client and come back empty for
- * anything else, and the gateway reads the client marker out of this header to decide
- * that. So the shape is not cosmetic, and a fingerprint stored before this shape was
- * correct would keep asking for a model it can no longer be served.
- *
- * The older shape is `antigravity/<version> <platform>/<arch>`, which already carries
- * everything the current one needs, so it is converted rather than replaced: the same
- * account keeps the same platform and architecture, and the client build is derived from
- * the device id so it stays fixed for the life of the fingerprint instead of changing on
- * every request. A fingerprint already in the current shape is left exactly as it is.
- */
-export declare function antigravityUserAgentFor(fingerprint: Fingerprint): string;
-/**
  * Update the version in a fingerprint's userAgent to match the current runtime version.
  * Called after version fetcher resolves so saved fingerprints always carry the latest version.
  * Returns true if the userAgent was changed.

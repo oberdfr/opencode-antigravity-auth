@@ -52,6 +52,7 @@ import { createProactiveRefreshQueue, type ProactiveRefreshQueue } from "./plugi
 import { initLogger, createLogger } from "./plugin/logger";
 import { initHealthTracker, getHealthTracker, initTokenTracker, getTokenTracker } from "./plugin/rotation";
 import { initAntigravityVersion } from "./plugin/version";
+import { ensureAntigravityHubVersion } from "./plugin/hub-version";
 import { executeSearch } from "./plugin/search";
 import type {
   GetAuth,
@@ -1239,7 +1240,10 @@ export const createAntigravityPlugin = (providerId: string) => async (
   initLogger(client);
   
   // Fetch latest Antigravity version from remote API (non-blocking, falls back to hardcoded)
-  await initAntigravityVersion();
+  // Both are awaited before the first request: the application version goes in the
+  // browser-shaped headers, and the hub version is the one the gateway gates models on,
+  // which is a different service and a different number.
+  await Promise.all([initAntigravityVersion(), ensureAntigravityHubVersion()]);
   
   // Initialize health tracker for hybrid strategy
   if (config.health_score) {
