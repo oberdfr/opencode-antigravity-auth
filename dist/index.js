@@ -20,14 +20,14 @@ var ANTIGRAVITY_SCOPES = [
   "https://www.googleapis.com/auth/experimentsandconfigs"
 ];
 var ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
-var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.googleapis.com";
-var ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY_PROD = "https://daily-cloudcode-pa.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_AUTOPUSH = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_FALLBACKS = [
   ANTIGRAVITY_ENDPOINT_DAILY,
-  ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX,
   ANTIGRAVITY_ENDPOINT_AUTOPUSH,
+  ANTIGRAVITY_ENDPOINT_DAILY_PROD,
   ANTIGRAVITY_ENDPOINT_PROD
 ];
 var ANTIGRAVITY_LOAD_ENDPOINTS = [
@@ -5892,7 +5892,7 @@ function resolveModelWithTier(requestedModel, options = {}) {
     const flashBase = baseName.replace(/-tiered$/i, "");
     const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
     return {
-      actualModel: `${flashBase}-${level}`,
+      actualModel: `${flashBase}-tiered`,
       thinkingLevel: level,
       tier: level,
       isThinkingModel: true,
@@ -6547,6 +6547,7 @@ var OS_VERSIONS = {
   linux: ["5.15.0", "5.19.0", "6.1.0", "6.2.0", "6.5.0", "6.6.0"]
 };
 var ARCHITECTURES = ["x64", "arm64"];
+var CLIENT_MARKER = "aidev_client";
 var IDE_TYPES = [
   "ANTIGRAVITY"
 ];
@@ -6588,10 +6589,25 @@ function generateFingerprint() {
   };
 }
 function antigravityUserAgent(platform, arch) {
-  return `antigravity/${getAntigravityVersion()} (aidev_client; os_type=${platform}; arch=${arch}; cl=${randomClientBuild()})`;
+  return `antigravity/${getAntigravityVersion()} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${Math.floor(1e8 + Math.random() * 9e8)})`;
 }
-function randomClientBuild() {
-  return Math.floor(1e8 + Math.random() * 899999999);
+function antigravityUserAgentFor(fingerprint) {
+  if (fingerprint.userAgent.includes(CLIENT_MARKER)) {
+    return fingerprint.userAgent;
+  }
+  const legacy = fingerprint.userAgent.match(/^antigravity\/[\d.]+\s+([\w.-]+)\/([\w.-]+)$/);
+  const platform = legacy?.[1] ?? "linux";
+  const arch = legacy?.[2] ?? "x64";
+  const version = fingerprint.userAgent.match(/^antigravity\/([\d.]+)/)?.[1] ?? getAntigravityVersion();
+  return `antigravity/${version} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${clientBuildFrom(fingerprint)})`;
+}
+function clientBuildFrom(fingerprint) {
+  let hash = 0;
+  const seed = `${fingerprint.deviceId}:${fingerprint.sessionToken}`;
+  for (let index = 0; index < seed.length; index++) {
+    hash = hash * 31 + seed.charCodeAt(index) >>> 0;
+  }
+  return 1e8 + hash % 9e8;
 }
 function updateFingerprintVersion(fingerprint) {
   const currentVersion = getAntigravityVersion();
@@ -6608,7 +6624,11 @@ function buildFingerprintHeaders(fingerprint) {
     return {};
   }
   return {
-    "User-Agent": fingerprint.userAgent
+    // Derived rather than read straight off the fingerprint, so an account saved before
+    // the client marker existed is still recognised as the IDE client. The stored string
+    // is left alone: the fingerprint is the account's identity, and rewriting it to suit
+    // a header would change what every later request sends.
+    "User-Agent": antigravityUserAgentFor(fingerprint)
   };
 }
 var sessionFingerprint = null;

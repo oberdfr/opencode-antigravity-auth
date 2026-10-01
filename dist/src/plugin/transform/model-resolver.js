@@ -204,23 +204,19 @@ export function resolveModelWithTier(requestedModel, options = {}) {
     const explicitQuota = isAntigravity || isImageModel;
     const isGemini3 = modelWithoutQuota.toLowerCase().startsWith("gemini-3");
     const skipAlias = isAntigravity && isGemini3;
-    // 3.6/3.7/3.8 Flash: resolve to the per-tier sku for the requested level.
+    // 3.6/3.7/3.8 Flash: always resolve to -tiered + thinkingLevel.
     // Do this before skipAlias so antigravity-gemini-3.7-flash-medium works too.
     //
-    // The per-tier sku names the level, so it has to follow the level that was asked for.
-    // The level reaches here from the variant's thinkingConfig, since the catalog carries
-    // one model per family and no suffix on the id.
+    // The per-tier skus (flash-low/medium/high) are what the IDE client asks for, and they
+    // are served only from the production hosts — which these accounts are not licensed
+    // for. On the sandbox hosts they come back 404, so the tiered name is what the level
+    // travels on here. The level still comes from the request rather than from the model
+    // name, because the catalog carries one model per family.
     if (isTieredFlashModel(baseName) && quotaPreference === "antigravity" && !isImageModel) {
         const flashBase = baseName.replace(/-tiered$/i, "");
-        // Only these three have a sku. The model-name suffix is checked first because an id
-        // that names a level is unambiguous; only then the level the request carries.
-        //
-        // minimal has no sku of its own and is served by the low one, and anything that is
-        // not a level we can ask for falls back to the default rather than becoming part of
-        // a model id the gateway has never heard of.
         const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
         return {
-            actualModel: `${flashBase}-${level}`,
+            actualModel: `${flashBase}-tiered`,
             thinkingLevel: level,
             tier: level,
             isThinkingModel: true,

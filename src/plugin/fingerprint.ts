@@ -20,6 +20,11 @@ const OS_VERSIONS: Record<string, string[]> = {
 
 const ARCHITECTURES = ["x64", "arm64"];
 
+/**
+ * Marks the agent as the IDE client, which is what the gateway serves models to.
+ */
+const CLIENT_MARKER = "aidev_client";
+
 const IDE_TYPES = [
   "ANTIGRAVITY",
 ] as const;
@@ -123,12 +128,7 @@ export function generateFingerprint(): Fingerprint {
  * fingerprint rather than a constant, the same way the device id is.
  */
 function antigravityUserAgent(platform: string, arch: string): string {
-  return `antigravity/${getAntigravityVersion()} (aidev_client; os_type=${platform}; arch=${arch}; cl=${randomClientBuild()})`;
-}
-
-/** A client build number for the fingerprint, stable within one fingerprint. */
-function randomClientBuild(): number {
-  return Math.floor(100000000 + Math.random() * 899999999);
+  return `antigravity/${getAntigravityVersion()} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${Math.floor(100_000_000 + Math.random() * 900_000_000)})`;
 }
 
 /**
@@ -151,6 +151,44 @@ export function collectCurrentFingerprint(): Fingerprint {
     },
     createdAt: Date.now(),
   };
+}
+
+/**
+ * The user agent in the shape the real Antigravity client sends, derived from whatever
+ * the fingerprint already carries.
+ *
+ * The per-tier Flash models are served to the IDE client and come back empty for
+ * anything else, and the gateway reads the client marker out of this header to decide
+ * that. So the shape is not cosmetic, and a fingerprint stored before this shape was
+ * correct would keep asking for a model it can no longer be served.
+ *
+ * The older shape is `antigravity/<version> <platform>/<arch>`, which already carries
+ * everything the current one needs, so it is converted rather than replaced: the same
+ * account keeps the same platform and architecture, and the client build is derived from
+ * the device id so it stays fixed for the life of the fingerprint instead of changing on
+ * every request. A fingerprint already in the current shape is left exactly as it is.
+ */
+export function antigravityUserAgentFor(fingerprint: Fingerprint): string {
+  if (fingerprint.userAgent.includes(CLIENT_MARKER)) {
+    return fingerprint.userAgent;
+  }
+
+  const legacy = fingerprint.userAgent.match(/^antigravity\/[\d.]+\s+([\w.-]+)\/([\w.-]+)$/);
+  const platform = legacy?.[1] ?? "linux";
+  const arch = legacy?.[2] ?? "x64";
+  const version = fingerprint.userAgent.match(/^antigravity\/([\d.]+)/)?.[1] ?? getAntigravityVersion();
+
+  return `antigravity/${version} (${CLIENT_MARKER}; os_type=${platform}; arch=${arch}; cl=${clientBuildFrom(fingerprint)})`;
+}
+
+/** A client build number that is fixed for one fingerprint. */
+function clientBuildFrom(fingerprint: Fingerprint): number {
+  let hash = 0;
+  const seed = `${fingerprint.deviceId}:${fingerprint.sessionToken}`;
+  for (let index = 0; index < seed.length; index++) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+  return 100_000_000 + (hash % 900_000_000);
 }
 
 /**
@@ -181,7 +219,11 @@ export function buildFingerprintHeaders(fingerprint: Fingerprint | null): Partia
   }
 
   return {
-    "User-Agent": fingerprint.userAgent,
+    // Derived rather than read straight off the fingerprint, so an account saved before
+    // the client marker existed is still recognised as the IDE client. The stored string
+    // is left alone: the fingerprint is the account's identity, and rewriting it to suit
+    // a header would change what every later request sends.
+    "User-Agent": antigravityUserAgentFor(fingerprint),
   };
 }
 

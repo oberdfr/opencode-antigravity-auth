@@ -118,57 +118,57 @@ describe("resolveModelWithTier", () => {
     });
   });
 
-  describe("Tiered flash models (3.6/3.7/3.8) — one sku per level", () => {
-    it("antigravity-gemini-3.8-flash defaults to the medium sku", () => {
+  describe("Tiered flash models (3.6/3.7/3.8) — level on the tiered name", () => {
+    it("antigravity-gemini-3.8-flash defaults to -tiered + medium", () => {
       const result = resolveModelWithTier("antigravity-gemini-3.8-flash");
-      expect(result.actualModel).toBe("gemini-3.8-flash-medium");
+      expect(result.actualModel).toBe("gemini-3.8-flash-tiered");
       expect(result.thinkingLevel).toBe("medium");
       expect(result.isThinkingModel).toBe(true);
       expect(result.quotaPreference).toBe("antigravity");
     });
 
-    it("antigravity-gemini-3.7-flash-high maps to the high sku", () => {
+    it("antigravity-gemini-3.7-flash-high keeps -tiered and asks for high", () => {
       const result = resolveModelWithTier("antigravity-gemini-3.7-flash-high");
-      expect(result.actualModel).toBe("gemini-3.7-flash-high");
+      expect(result.actualModel).toBe("gemini-3.7-flash-tiered");
       expect(result.thinkingLevel).toBe("high");
     });
 
-    it("antigravity-gemini-3.6-flash-low maps to the low sku", () => {
+    it("antigravity-gemini-3.6-flash-low keeps -tiered and asks for low", () => {
       const result = resolveModelWithTier("antigravity-gemini-3.6-flash-low");
-      expect(result.actualModel).toBe("gemini-3.6-flash-low");
+      expect(result.actualModel).toBe("gemini-3.6-flash-tiered");
       expect(result.thinkingLevel).toBe("low");
     });
 
     // The catalog carries one model per family and the level arrives as a variant patch on
-    // the body, so the model id alone cannot say which level was chosen. The sku names the
-    // level, so without this every level would resolve to the medium sku and ask the
-    // gateway for reasoning it was not asked to produce.
+    // the body, so the model id alone cannot say which level was chosen. The level travels
+    // on generationConfig instead, and without this every level would ask for the default
+    // and the gateway would be asked for reasoning it was not asked to produce.
     it("follows the level the request carries when the id has no suffix", () => {
       for (const level of ["low", "medium", "high"] as const) {
         const result = resolveModelWithTier("antigravity-gemini-3.8-flash", { thinkingLevel: level });
 
-        expect(result.actualModel).toBe(`gemini-3.8-flash-${level}`);
+        expect(result.actualModel).toBe("gemini-3.8-flash-tiered");
         expect(result.thinkingLevel).toBe(level);
       }
     });
 
-    it("serves minimal from the low sku", () => {
+    it("serves minimal from the low level", () => {
       const result = resolveModelWithTier("antigravity-gemini-3.8-flash", { thinkingLevel: "minimal" });
 
-      expect(result.actualModel).toBe("gemini-3.8-flash-low");
+      expect(result.thinkingLevel).toBe("low");
     });
 
-    it("ignores an unknown level and stays on the default sku", () => {
+    it("ignores an unknown level and stays on the default", () => {
       const result = resolveModelWithTier("antigravity-gemini-3.8-flash", {
         thinkingLevel: "nonsense" as never,
       });
 
-      expect(result.actualModel).toBe("gemini-3.8-flash-medium");
+      expect(result.thinkingLevel).toBe("medium");
     });
 
-    it("gemini-3.7-flash (no prefix) still uses a per-tier sku on antigravity quota", () => {
+    it("gemini-3.7-flash (no prefix) still uses -tiered on antigravity quota", () => {
       const result = resolveModelWithTier("gemini-3.7-flash");
-      expect(result.actualModel).toBe("gemini-3.7-flash-medium");
+      expect(result.actualModel).toBe("gemini-3.7-flash-tiered");
       expect(result.thinkingLevel).toBe("medium");
       expect(result.quotaPreference).toBe("antigravity");
     });
