@@ -6462,6 +6462,55 @@ function createSessionRecoveryHook(ctx, config) {
   };
 }
 
+// src/plugin/antigravity-envelope.ts
+import { createHash as createHash3 } from "node:crypto";
+var INT63_MASK = (1n << 63n) - 1n;
+function signedDecimalFromHash(text) {
+  const digest = createHash3("sha256").update(text).digest();
+  let value = 0n;
+  for (let index = 0; index < 8; index++) {
+    value = value << 8n | BigInt(digest[index] ?? 0);
+  }
+  return `-${(value & INT63_MASK).toString()}`;
+}
+function uuidFromHash(text) {
+  const hex = createHash3("sha256").update(text).digest("hex").slice(0, 32);
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    `4${hex.slice(13, 16)}`,
+    (parseInt(hex[16], 16) & 3 | 8).toString(16) + hex.slice(17, 20),
+    hex.slice(20, 32)
+  ].join("-");
+}
+var stepByConversation = /* @__PURE__ */ new Map();
+var MAX_TRACKED_CONVERSATIONS = 500;
+function antigravityIdentity(conversation, isClaude, lastExecutionId) {
+  const step = (stepByConversation.get(conversation) ?? 1) + 1;
+  stepByConversation.set(conversation, step);
+  if (stepByConversation.size > MAX_TRACKED_CONVERSATIONS) {
+    for (const key of stepByConversation.keys()) {
+      if (stepByConversation.get(key) === step) stepByConversation.delete(key);
+      if (stepByConversation.size <= MAX_TRACKED_CONVERSATIONS) break;
+    }
+  }
+  const agentId = uuidFromHash(`${conversation}:agent`);
+  const trajectoryId = uuidFromHash(`${conversation}:trajectory`);
+  const usageLabel = String(isClaude);
+  const labels = {
+    last_step_index: String(step - 1),
+    trajectory_id: trajectoryId,
+    used_claude: usageLabel,
+    used_claude_conservative: usageLabel
+  };
+  if (lastExecutionId) labels.last_execution_id = lastExecutionId;
+  return {
+    sessionId: signedDecimalFromHash(conversation),
+    requestId: `agent/${agentId}/${Date.now()}/${trajectoryId}/${step}`,
+    labels
+  };
+}
+
 // src/plugin/fingerprint.ts
 import * as crypto from "node:crypto";
 var OS_VERSIONS = {
@@ -7499,14 +7548,19 @@ ${hint}`;
           model: effectiveModel,
           request: requestPayload
         };
+        let identity;
         if (headerStyle === "antigravity") {
+          identity = antigravityIdentity(signatureSessionKey, isClaudeModel(effectiveModel));
           wrappedBody.requestType = "agent";
           wrappedBody.userAgent = "antigravity";
-          wrappedBody.requestId = "agent-" + crypto2.randomUUID();
+          wrappedBody.requestId = identity.requestId;
+          if (wrappedBody.request && typeof wrappedBody.request === "object") {
+            wrappedBody.request.labels = identity.labels;
+          }
         }
         if (wrappedBody.request && typeof wrappedBody.request === "object") {
           sessionId = signatureSessionKey;
-          wrappedBody.request.sessionId = signatureSessionKey;
+          wrappedBody.request.sessionId = identity?.sessionId ?? signatureSessionKey;
         }
         body = JSON.stringify(wrappedBody);
       }

@@ -13,6 +13,7 @@ import { sanitizeCrossModelPayloadInPlace } from "./transform/cross-model-saniti
 import { isGemini3Model, isImageGenerationModel, buildImageGenerationConfig, applyGeminiTransforms } from "./transform";
 import { resolveModelWithTier, resolveModelWithVariant, resolveModelForHeaderStyle, isClaudeModel, isClaudeThinkingModel, CLAUDE_THINKING_MAX_OUTPUT_TOKENS, } from "./transform";
 import { detectErrorType } from "./recovery";
+import { antigravityIdentity } from "./antigravity-envelope";
 import { getSessionFingerprint, buildFingerprintHeaders } from "./fingerprint";
 const log = createLogger("request");
 const PLUGIN_SESSION_ID = `-${crypto.randomUUID()}`;
@@ -1167,15 +1168,32 @@ export function prepareAntigravityRequest(input, init, accessToken, projectId, e
                     model: effectiveModel,
                     request: requestPayload,
                 };
+                // Built once, because it advances the step counter: asking twice would advance it
+                // twice and leave the request id and the labels describing different steps.
+                let identity;
                 if (headerStyle === "antigravity") {
+                    // Identity in the shape the real client sends: a signed-decimal session id that
+                    // is stable for the conversation, a request id that names the trajectory and the
+                    // step within it, and the labels the gateway reads back off the request. A
+                    // request id of "agent-<uuid>" and a composite session string are accepted but
+                    // do not identify a trajectory, and the gateway then answers as though the
+                    // conversation were new.
+                    identity = antigravityIdentity(signatureSessionKey, isClaudeModel(effectiveModel));
                     wrappedBody.requestType = "agent";
                     wrappedBody.userAgent = "antigravity";
-                    wrappedBody.requestId = "agent-" + crypto.randomUUID();
+                    wrappedBody.requestId = identity.requestId;
+                    if (wrappedBody.request && typeof wrappedBody.request === "object") {
+                        wrappedBody.request.labels = identity.labels;
+                    }
                 }
                 if (wrappedBody.request && typeof wrappedBody.request === 'object') {
-                    // Use stable session ID for signature caching across multi-turn conversations
+                    // Two identities, deliberately. The signature cache keys on a composite that
+                    // carries the model and project, so a signature is never replayed into a
+                    // different conversation or model; the wire carries the signed-decimal id the
+                    // gateway expects, because that is what it recognises.
                     sessionId = signatureSessionKey;
-                    wrappedBody.request.sessionId = signatureSessionKey;
+                    wrappedBody.request.sessionId =
+                        identity?.sessionId ?? signatureSessionKey;
                 }
                 body = JSON.stringify(wrappedBody);
             }
