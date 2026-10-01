@@ -29,7 +29,7 @@ describe("transform/gemini", () => {
     });
 
     it("returns true for gemini-3-pro-high", () => {
-      expect(isGeminiModel("gemini-3-pro-high")).toBe(true);
+      expect(isGeminiModel("gemini-3.1-pro-high")).toBe(true);
     });
 
     it("returns true for uppercase GEMINI-PRO", () => {
@@ -67,7 +67,7 @@ describe("transform/gemini", () => {
     });
 
     it("returns true for gemini-3-pro-high", () => {
-      expect(isGemini3Model("gemini-3-pro-high")).toBe(true);
+      expect(isGemini3Model("gemini-3.1-pro-high")).toBe(true);
     });
 
     it("returns true for gemini-3-flash", () => {
@@ -376,7 +376,7 @@ describe("transform/gemini", () => {
     it("applies Gemini 3 thinking config with thinkingLevel", () => {
       const payload: RequestPayload = { contents: [] };
       applyGeminiTransforms(payload, {
-        model: "gemini-3-pro-high",
+        model: "gemini-3.1-pro-high",
         tierThinkingLevel: "high",
         normalizedThinking: { includeThoughts: true },
       });
@@ -464,7 +464,7 @@ describe("transform/gemini", () => {
     it("defaults includeThoughts to true when not specified", () => {
       const payload: RequestPayload = { contents: [] };
       applyGeminiTransforms(payload, {
-        model: "gemini-3-pro-low",
+        model: "gemini-3.1-pro-low",
         tierThinkingLevel: "low",
         normalizedThinking: {},
       });
@@ -475,7 +475,7 @@ describe("transform/gemini", () => {
     it("respects includeThoughts false", () => {
       const payload: RequestPayload = { contents: [] };
       applyGeminiTransforms(payload, {
-        model: "gemini-3-pro-high",
+        model: "gemini-3.1-pro-high",
         tierThinkingLevel: "high",
         normalizedThinking: { includeThoughts: false },
       });

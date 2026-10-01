@@ -49,6 +49,12 @@ export declare const GEMINI_3_THINKING_LEVELS: readonly ["minimal", "low", "medi
  * - Claude non-thinking: claude-{model} (no -thinking suffix)
  */
 export declare const MODEL_ALIASES: Record<string, string>;
+/**
+ * Points a retired id at the model that serves it, keeping any tier suffix.
+ *
+ * Returns the id unchanged when it is not one of the retired ones.
+ */
+export declare function applyModelRedirect(model: string): string;
 export declare function isTieredFlashModel(model: string): boolean;
 /**
  * Resolves a model name with optional tier suffix and quota prefix to its actual API model name

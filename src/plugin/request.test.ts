@@ -1052,7 +1052,7 @@ it("removes x-api-key header", () => {
           undefined,
           "antigravity"
         );
-        expect(result.effectiveModel).toBe("gemini-3-pro-low");
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-low");
       });
 
       it("transforms gemini-3.1-pro-preview to gemini-3.1-pro-low for antigravity headerStyle", () => {
@@ -1091,7 +1091,11 @@ it("removes x-api-key header", () => {
         expect(result.effectiveModel).toBe("gemini-3-flash-preview");
       });
 
-      it("transforms gemini-3-pro-low to gemini-3-pro-preview for gemini-cli headerStyle", () => {
+      it("transforms gemini-3-pro-low to the 3.1 preview for gemini-cli headerStyle", () => {
+        // The withdrawal is a property of the model, not of the route that serves it, so
+        // the redirect applies on the Gemini CLI path too. Restricting it to Antigravity
+        // would leave this id answering with a retirement notice on one quota and not the
+        // other, which is the kind of split that gets mistaken for a quota problem.
         const result = prepareAntigravityRequest(
           "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-low:generateContent",
           { method: "POST", body: JSON.stringify({ contents: [] }) },
@@ -1100,7 +1104,7 @@ it("removes x-api-key header", () => {
           undefined,
           "gemini-cli"
         );
-        expect(result.effectiveModel).toBe("gemini-3-pro-preview");
+        expect(result.effectiveModel).toBe("gemini-3.1-pro-preview");
       });
 
       it("transforms gemini-3.1-pro-low to gemini-3.1-pro-preview for gemini-cli headerStyle", () => {

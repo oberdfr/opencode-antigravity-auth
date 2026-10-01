@@ -17,7 +17,7 @@ describe("cross-model-sanitizer", () => {
     });
 
     it("identifies Gemini models", () => {
-      expect(getModelFamily("gemini-3-pro-low")).toBe("gemini");
+      expect(getModelFamily("gemini-3.1-pro-low")).toBe("gemini");
       expect(getModelFamily("gemini-3-flash")).toBe("gemini");
       expect(getModelFamily("gemini-2.5-pro")).toBe("gemini");
     });
@@ -328,7 +328,7 @@ describe("cross-model-sanitizer", () => {
       };
 
       const result = sanitizeCrossModelPayload(payload, {
-        targetModel: "gemini-3-pro-low",
+        targetModel: "gemini-3.1-pro-low",
       });
 
       expect(result.modified).toBe(true);

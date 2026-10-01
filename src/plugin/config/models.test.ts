@@ -26,6 +26,9 @@ describe("OPENCODE_MODEL_DEFINITIONS", () => {
       "gemini-2.5-flash",
       "gemini-2.5-pro",
       "gemini-3-flash-preview",
+      // Kept as its own entry even though requests for it are served by 3.1 Pro: the
+      // id is in people's saved config, and a model that is gone from the picker is
+      // harder to notice than one that quietly works.
       "gemini-3-pro-preview",
       "gemini-3.1-pro-preview",
       "gemini-3.1-pro-preview-customtools",

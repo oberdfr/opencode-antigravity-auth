@@ -5795,6 +5795,21 @@ var QUOTA_PREFIX_REGEX = /^antigravity-/i;
 var GEMINI_3_PRO_REGEX = /^gemini-3(?:\.\d+)?-pro/i;
 var GEMINI_3_FLASH_REGEX = /^gemini-3(?:\.\d+)?-flash/i;
 var TIERED_FLASH_REGEX = /^gemini-3\.(6|7|8)-flash(-tiered)?$/i;
+var RETIRED_MODELS = {
+  "gemini-3-pro": "gemini-3.1-pro",
+  // The Gemini CLI route reaches the same withdrawn model under its preview name, so it
+  // needs covering too. Leaving one route on the retired id and the other on the
+  // replacement would make the split look like a quota problem rather than a model
+  // that is simply gone.
+  "gemini-3-pro-preview": "gemini-3.1-pro-preview"
+};
+function applyModelRedirect(model) {
+  const match = /^(.*?)-(minimal|low|medium|high)$/.exec(model);
+  const base = (match?.[1] ?? model).toLowerCase();
+  const tier = match?.[2] ? `-${match[2]}` : "";
+  const replacement = RETIRED_MODELS[base];
+  return replacement ? `${replacement}${tier}` : model;
+}
 function isTieredFlashModel(model) {
   return TIERED_FLASH_REGEX.test(model);
 }
@@ -5868,7 +5883,7 @@ function resolveModelWithTier(requestedModel, options = {}) {
     }
   }
   const actualModel = skipAlias ? antigravityModel : MODEL_ALIASES[modelWithoutQuota] || MODEL_ALIASES[baseName] || baseName;
-  const resolvedModel = actualModel;
+  const resolvedModel = applyModelRedirect(actualModel);
   const isThinking = isThinkingCapableModel2(resolvedModel);
   if (isImageModel) {
     return {

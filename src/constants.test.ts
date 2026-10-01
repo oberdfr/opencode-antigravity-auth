@@ -27,7 +27,7 @@ describe("getRandomizedHeaders", () => {
     })
 
     it("ignores requested model and keeps static User-Agent", () => {
-      const headers = getRandomizedHeaders("gemini-cli", "gemini-3-pro-preview")
+      const headers = getRandomizedHeaders("gemini-cli", "gemini-3.1-pro-preview")
       expect(headers["User-Agent"]).toBe("google-api-nodejs-client/9.15.1")
     })
   })
