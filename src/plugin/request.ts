@@ -41,6 +41,7 @@ import {
   injectToolHardeningInstruction,
   isThinkingCapableModel,
   normalizeThinkingConfig,
+  peekThinkingLevel,
   parseAntigravityApiBody,
   resolveThinkingConfig,
   rewriteAntigravityPreviewAccessError,
@@ -816,7 +817,13 @@ export function prepareAntigravityRequest(
   const [, rawModel = "", rawAction = ""] = match;
   const requestedModel = rawModel;
 
-  const resolved = resolveModelForHeaderStyle(rawModel, headerStyle);
+  // The level the caller asked for reaches the body as a variant patch, not on the model
+  // id, so it is read back out here. Model resolution needs it: the per-tier Flash sku
+  // names the level, and without it every level would resolve to the same sku.
+  const requestedLevel = peekThinkingLevel(baseInit.body);
+  const resolved = resolveModelForHeaderStyle(rawModel, headerStyle, {
+    thinkingLevel: requestedLevel,
+  });
   let effectiveModel = resolved.actualModel;
 
   const streaming = rawAction === STREAM_ACTION;
@@ -1039,7 +1046,7 @@ export function prepareAntigravityRequest(
               // Gemini 3 uses thinkingLevel string (low/medium/high)
               thinkingConfig = {
                 includeThoughts: normalizedThinking.includeThoughts,
-                thinkingLevel: tierThinkingLevel,
+                thinkingLevel: tierThinkingLevel.toUpperCase(),
               };
             } else {
               // Gemini 2.5 and others use numeric budget
@@ -1577,7 +1584,10 @@ export function prepareAntigravityRequest(
     const fingerprint = options?.fingerprint ?? getSessionFingerprint();
     const fingerprintHeaders = buildFingerprintHeaders(fingerprint);
 
-    headers.set("User-Agent", fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"]);
+    headers.set(
+      "User-Agent",
+      fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"],
+    );
   } else {
     // Gemini CLI mode: match opencode-gemini-auth Code Assist header set exactly
     headers.set("User-Agent", GEMINI_CLI_HEADERS["User-Agent"]);

@@ -66,13 +66,13 @@ describe("a chosen thinking level reaches the gateway", () => {
     // goes out, and the level is simply absent from it.
     const result = sentThinkingConfig("antigravity-gemini-3.8-flash", "high");
 
-    expect(result.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "high" });
+    expect(result.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "HIGH" });
   });
 
   it("sends a different level when a different one is chosen", () => {
     const low = sentThinkingConfig("antigravity-gemini-3.8-flash", "low");
 
-    expect(low.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "low" });
+    expect(low.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "LOW" });
   });
 
   it("does not leave the level at the model default when one was asked for", () => {
@@ -96,7 +96,7 @@ describe("a chosen thinking level reaches the gateway", () => {
   it("works the same on Gemini 3.1 Pro", () => {
     expect(sentThinkingConfig("antigravity-gemini-3.1-pro", "high").thinkingConfig).toEqual({
       includeThoughts: true,
-      thinkingLevel: "high",
+      thinkingLevel: "HIGH",
     });
   });
 });

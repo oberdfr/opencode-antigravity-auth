@@ -55,7 +55,7 @@ export function generateFingerprint() {
     return {
         deviceId: generateDeviceId(),
         sessionToken: generateSessionToken(),
-        userAgent: `antigravity/${getAntigravityVersion()} ${platform}/${arch}`,
+        userAgent: antigravityUserAgent(platform, arch),
         apiClient: randomFrom(SDK_CLIENTS),
         clientMetadata: {
             ideType: randomFrom(IDE_TYPES),
@@ -64,6 +64,23 @@ export function generateFingerprint() {
         },
         createdAt: Date.now(),
     };
+}
+/**
+ * The user agent the real Antigravity client sends.
+ *
+ * The shape matters, not just the version: Cloud Code Assist decides which wire models
+ * it will serve from it. The per-tier Flash skus are served to the IDE client and
+ * rejected for anything else, so a user agent without the client marker loses those
+ * models and the request comes back empty. The platform and architecture stay
+ * randomised with the rest of the fingerprint, and the client build is part of the
+ * fingerprint rather than a constant, the same way the device id is.
+ */
+function antigravityUserAgent(platform, arch) {
+    return `antigravity/${getAntigravityVersion()} (aidev_client; os_type=${platform}; arch=${arch}; cl=${randomClientBuild()})`;
+}
+/** A client build number for the fingerprint, stable within one fingerprint. */
+function randomClientBuild() {
+    return Math.floor(100000000 + Math.random() * 899999999);
 }
 /**
  * Collect fingerprint based on actual current system.
@@ -75,7 +92,7 @@ export function collectCurrentFingerprint() {
     return {
         deviceId: generateDeviceId(),
         sessionToken: generateSessionToken(),
-        userAgent: `antigravity/${getAntigravityVersion()} ${platform}/${arch}`,
+        userAgent: antigravityUserAgent(platform, arch),
         apiClient: "google-cloud-sdk vscode_cloudshelleditor/0.1",
         clientMetadata: {
             ideType: "ANTIGRAVITY",

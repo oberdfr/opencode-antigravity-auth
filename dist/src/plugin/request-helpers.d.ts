@@ -108,6 +108,15 @@ export declare function deepFilterThinkingBlocks(payload: unknown, sessionId?: s
  */
 export declare function transformThinkingParts(response: unknown): unknown;
 /**
+ * Reads back the thinking level a request is carrying, before the model is resolved.
+ *
+ * OpenCode sends the chosen level as a variant patch on the body rather than on the model
+ * id, so model resolution — which needs the level to pick the per-tier Flash sku — has to
+ * read it from the body. Returns undefined when the body is not JSON or carries no level,
+ * which leaves the resolver on its own default.
+ */
+export declare function peekThinkingLevel(body: unknown): "low" | "medium" | "high" | undefined;
+/**
  * Ensures thinkingConfig is valid: includeThoughts only allowed when budget > 0.
  */
 export declare function normalizeThinkingConfig(config: unknown): ThinkingConfig | undefined;

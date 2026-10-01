@@ -1552,6 +1552,42 @@ export function transformThinkingParts(response: unknown): unknown {
 }
 
 /**
+ * Reads back the thinking level a request is carrying, before the model is resolved.
+ *
+ * OpenCode sends the chosen level as a variant patch on the body rather than on the model
+ * id, so model resolution — which needs the level to pick the per-tier Flash sku — has to
+ * read it from the body. Returns undefined when the body is not JSON or carries no level,
+ * which leaves the resolver on its own default.
+ */
+export function peekThinkingLevel(body: unknown): "low" | "medium" | "high" | undefined {
+  if (typeof body !== "string" || !body) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+
+  const generationConfig = (parsed as Record<string, unknown>).generationConfig;
+  if (!generationConfig || typeof generationConfig !== "object") return undefined;
+
+  const thinkingConfig = (generationConfig as Record<string, unknown>).thinkingConfig;
+  if (!thinkingConfig || typeof thinkingConfig !== "object") return undefined;
+
+  const level = (thinkingConfig as Record<string, unknown>).thinkingLevel;
+  if (typeof level !== "string") return undefined;
+
+  const normalized = level.toLowerCase();
+  // minimal is served by the low sku, matching how the tier table collapses it.
+  if (normalized === "minimal" || normalized === "low") return "low";
+  if (normalized === "medium") return "medium";
+  if (normalized === "high") return "high";
+  return undefined;
+}
+
+/**
  * Ensures thinkingConfig is valid: includeThoughts only allowed when budget > 0.
  */
 export function normalizeThinkingConfig(config: unknown): ThinkingConfig | undefined {

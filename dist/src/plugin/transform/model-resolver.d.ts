@@ -4,9 +4,18 @@
  * Resolves model names with tier suffixes (e.g., gemini-3-pro-high, claude-opus-4-6-thinking-low)
  * to their actual API model names and corresponding thinking configurations.
  */
-import type { ResolvedModel, GoogleSearchConfig } from "./types";
+import type { ResolvedModel, ThinkingTier, GoogleSearchConfig } from "./types";
 export interface ModelResolverOptions {
     cli_first?: boolean;
+    /**
+     * Thinking level the request asked for, when it is not carried by the model name.
+     *
+     * The catalog exposes one model per family and the level arrives as a variant that
+     * patches the body, so the model id alone cannot say which level was chosen. Without
+     * this the tiered Flash branch would fall back to its default and every level would
+     * resolve to the same wire model.
+     */
+    thinkingLevel?: ThinkingTier;
 }
 /**
  * Thinking tier budgets by model family.
@@ -56,26 +65,6 @@ export declare const MODEL_ALIASES: Record<string, string>;
  */
 export declare function applyModelRedirect(model: string): string;
 export declare function isTieredFlashModel(model: string): boolean;
-/**
- * Resolves a model name with optional tier suffix and quota prefix to its actual API model name
- * and corresponding thinking configuration.
- *
- * Quota routing:
- * - Default to Antigravity quota unless cli_first is enabled for Gemini models
- * - Fallback to Gemini CLI happens at account rotation level when Antigravity is exhausted
- * - "antigravity-" prefix marks explicit quota (no fallback allowed)
- * - Claude and image models always use Antigravity
- *
- * Examples:
- * - "gemini-2.5-flash" → { quotaPreference: "antigravity" }
- * - "gemini-3-pro-preview" → { quotaPreference: "antigravity" }
- * - "antigravity-gemini-3-pro-high" → { quotaPreference: "antigravity", explicitQuota: true }
- * - "claude-opus-4-6-thinking-medium" → { quotaPreference: "antigravity" }
- *
- * @param requestedModel - The model name from the request
- * @param options - Optional configuration including cli_first preference
- * @returns Resolved model with thinking configuration
- */
 export declare function resolveModelWithTier(requestedModel: string, options?: ModelResolverOptions): ResolvedModel;
 /**
  * Gets the model family for routing decisions.
@@ -97,7 +86,7 @@ export interface VariantConfig {
  * - gemini-3-pro-preview (gemini-cli) → gemini-3-pro-low (antigravity)
  * - gemini-3-flash (antigravity) → gemini-3-flash-preview (gemini-cli)
  */
-export declare function resolveModelForHeaderStyle(requestedModel: string, headerStyle: "antigravity" | "gemini-cli"): ResolvedModel;
+export declare function resolveModelForHeaderStyle(requestedModel: string, headerStyle: "antigravity" | "gemini-cli", options?: ModelResolverOptions): ResolvedModel;
 /**
  * Resolves model with variant config from providerOptions.
  * Variant config takes priority over tier suffix in model name.

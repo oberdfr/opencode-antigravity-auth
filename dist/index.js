@@ -20,11 +20,13 @@ var ANTIGRAVITY_SCOPES = [
   "https://www.googleapis.com/auth/experimentsandconfigs"
 ];
 var ANTIGRAVITY_REDIRECT_URI = "http://localhost:51121/oauth-callback";
-var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY = "https://daily-cloudcode-pa.googleapis.com";
+var ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_AUTOPUSH = "https://autopush-cloudcode-pa.sandbox.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_PROD = "https://cloudcode-pa.googleapis.com";
 var ANTIGRAVITY_ENDPOINT_FALLBACKS = [
   ANTIGRAVITY_ENDPOINT_DAILY,
+  ANTIGRAVITY_ENDPOINT_DAILY_SANDBOX,
   ANTIGRAVITY_ENDPOINT_AUTOPUSH,
   ANTIGRAVITY_ENDPOINT_PROD
 ];
@@ -4427,6 +4429,27 @@ function transformThinkingParts(response) {
   }
   return result;
 }
+function peekThinkingLevel(body) {
+  if (typeof body !== "string" || !body) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return void 0;
+  }
+  if (!parsed || typeof parsed !== "object") return void 0;
+  const generationConfig = parsed.generationConfig;
+  if (!generationConfig || typeof generationConfig !== "object") return void 0;
+  const thinkingConfig = generationConfig.thinkingConfig;
+  if (!thinkingConfig || typeof thinkingConfig !== "object") return void 0;
+  const level = thinkingConfig.thinkingLevel;
+  if (typeof level !== "string") return void 0;
+  const normalized = level.toLowerCase();
+  if (normalized === "minimal" || normalized === "low") return "low";
+  if (normalized === "medium") return "medium";
+  if (normalized === "high") return "high";
+  return void 0;
+}
 function normalizeThinkingConfig(config) {
   if (!config || typeof config !== "object") {
     return void 0;
@@ -5848,6 +5871,11 @@ function isGemini3ProModel(model) {
 function isGemini3FlashModel(model) {
   return GEMINI_3_FLASH_REGEX.test(model);
 }
+function resolveFlashSkuLevel(level) {
+  if (level === "low" || level === "medium" || level === "high") return level;
+  if (level === "minimal") return "low";
+  return void 0;
+}
 function resolveModelWithTier(requestedModel, options = {}) {
   const isAntigravity = QUOTA_PREFIX_REGEX.test(requestedModel);
   const modelWithoutQuota = requestedModel.replace(QUOTA_PREFIX_REGEX, "");
@@ -5862,9 +5890,9 @@ function resolveModelWithTier(requestedModel, options = {}) {
   const skipAlias = isAntigravity && isGemini3;
   if (isTieredFlashModel(baseName) && quotaPreference === "antigravity" && !isImageModel) {
     const flashBase = baseName.replace(/-tiered$/i, "");
-    const level = tier === "low" || tier === "medium" || tier === "high" ? tier : TIERED_FLASH_DEFAULT_LEVEL;
+    const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
     return {
-      actualModel: `${flashBase}-tiered`,
+      actualModel: `${flashBase}-${level}`,
       thinkingLevel: level,
       tier: level,
       isThinkingModel: true,
@@ -5950,11 +5978,11 @@ function getModelFamily2(model) {
   }
   return "gemini-pro";
 }
-function resolveModelForHeaderStyle(requestedModel, headerStyle) {
+function resolveModelForHeaderStyle(requestedModel, headerStyle, options = {}) {
   const lower = requestedModel.toLowerCase();
   const isGemini3 = lower.includes("gemini-3");
   if (!isGemini3) {
-    return resolveModelWithTier(requestedModel);
+    return resolveModelWithTier(requestedModel, options);
   }
   if (headerStyle === "antigravity") {
     let transformedModel = requestedModel.replace(/-preview-customtools$/i, "").replace(/-preview$/i, "").replace(/^antigravity-/i, "");
@@ -5965,7 +5993,7 @@ function resolveModelForHeaderStyle(requestedModel, headerStyle) {
       transformedModel = `${transformedModel}-low`;
     }
     const prefixedModel = `antigravity-${transformedModel}`;
-    return resolveModelWithTier(prefixedModel);
+    return resolveModelWithTier(prefixedModel, options);
   }
   if (headerStyle === "gemini-cli") {
     let transformedModel = requestedModel.replace(/^antigravity-/i, "").replace(/-(low|medium|high)$/i, "");
@@ -5974,11 +6002,11 @@ function resolveModelForHeaderStyle(requestedModel, headerStyle) {
       transformedModel = `${transformedModel}-preview`;
     }
     return {
-      ...resolveModelWithTier(transformedModel),
+      ...resolveModelWithTier(transformedModel, options),
       quotaPreference: "gemini-cli"
     };
   }
-  return resolveModelWithTier(requestedModel);
+  return resolveModelWithTier(requestedModel, options);
 }
 
 // src/plugin/recovery/storage.ts
@@ -6549,7 +6577,7 @@ function generateFingerprint() {
   return {
     deviceId: generateDeviceId(),
     sessionToken: generateSessionToken(),
-    userAgent: `antigravity/${getAntigravityVersion()} ${platform}/${arch}`,
+    userAgent: antigravityUserAgent(platform, arch),
     apiClient: randomFrom2(SDK_CLIENTS),
     clientMetadata: {
       ideType: randomFrom2(IDE_TYPES),
@@ -6558,6 +6586,12 @@ function generateFingerprint() {
     },
     createdAt: Date.now()
   };
+}
+function antigravityUserAgent(platform, arch) {
+  return `antigravity/${getAntigravityVersion()} (aidev_client; os_type=${platform}; arch=${arch}; cl=${randomClientBuild()})`;
+}
+function randomClientBuild() {
+  return Math.floor(1e8 + Math.random() * 899999999);
 }
 function updateFingerprintVersion(fingerprint) {
   const currentVersion = getAntigravityVersion();
@@ -7084,7 +7118,10 @@ function prepareAntigravityRequest(input2, init, accessToken, projectId, endpoin
   }
   const [, rawModel = "", rawAction = ""] = match;
   const requestedModel = rawModel;
-  const resolved = resolveModelForHeaderStyle(rawModel, headerStyle);
+  const requestedLevel = peekThinkingLevel(baseInit.body);
+  const resolved = resolveModelForHeaderStyle(rawModel, headerStyle, {
+    thinkingLevel: requestedLevel
+  });
   let effectiveModel = resolved.actualModel;
   const streaming = rawAction === STREAM_ACTION;
   const defaultEndpoint = headerStyle === "gemini-cli" ? GEMINI_CLI_ENDPOINT : ANTIGRAVITY_ENDPOINT;
@@ -7241,7 +7278,7 @@ function prepareAntigravityRequest(input2, init, accessToken, projectId, endpoin
             } else if (tierThinkingLevel) {
               thinkingConfig = {
                 includeThoughts: normalizedThinking.includeThoughts,
-                thinkingLevel: tierThinkingLevel
+                thinkingLevel: tierThinkingLevel.toUpperCase()
               };
             } else {
               thinkingConfig = {
@@ -7586,7 +7623,10 @@ ${hint}`;
     const selectedHeaders = getRandomizedHeaders("antigravity", requestedModel);
     const fingerprint = options?.fingerprint ?? getSessionFingerprint();
     const fingerprintHeaders = buildFingerprintHeaders(fingerprint);
-    headers.set("User-Agent", fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"]);
+    headers.set(
+      "User-Agent",
+      fingerprintHeaders["User-Agent"] || selectedHeaders["User-Agent"]
+    );
   } else {
     headers.set("User-Agent", GEMINI_CLI_HEADERS["User-Agent"]);
     headers.set("X-Goog-Api-Client", GEMINI_CLI_HEADERS["X-Goog-Api-Client"]);

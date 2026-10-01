@@ -6,7 +6,7 @@ import { createStreamingTransformer, transformSseLine, transformStreamingPayload
 import { defaultSignatureStore } from "./stores/signature-store";
 import { DEBUG_MESSAGE_PREFIX, isDebugEnabled, isDebugTuiEnabled, logAntigravityDebugResponse, logCacheStats, } from "./debug";
 import { createLogger } from "./logger";
-import { cleanJSONSchemaForAntigravity, DEFAULT_THINKING_BUDGET, deepFilterThinkingBlocks, extractThinkingConfig, extractVariantThinkingConfig, extractUsageFromSsePayload, extractUsageMetadata, fixToolResponseGrouping, validateAndFixClaudeToolPairing, applyToolPairingFixes, injectParameterSignatures, injectToolHardeningInstruction, isThinkingCapableModel, normalizeThinkingConfig, parseAntigravityApiBody, resolveThinkingConfig, rewriteAntigravityPreviewAccessError, transformThinkingParts, } from "./request-helpers";
+import { cleanJSONSchemaForAntigravity, DEFAULT_THINKING_BUDGET, deepFilterThinkingBlocks, extractThinkingConfig, extractVariantThinkingConfig, extractUsageFromSsePayload, extractUsageMetadata, fixToolResponseGrouping, validateAndFixClaudeToolPairing, applyToolPairingFixes, injectParameterSignatures, injectToolHardeningInstruction, isThinkingCapableModel, normalizeThinkingConfig, peekThinkingLevel, parseAntigravityApiBody, resolveThinkingConfig, rewriteAntigravityPreviewAccessError, transformThinkingParts, } from "./request-helpers";
 import { CLAUDE_TOOL_SYSTEM_INSTRUCTION, CLAUDE_DESCRIPTION_PROMPT, ANTIGRAVITY_SYSTEM_INSTRUCTION, } from "../constants";
 import { analyzeConversationState, closeToolLoopForThinking, needsThinkingRecovery, } from "./thinking-recovery";
 import { sanitizeCrossModelPayloadInPlace } from "./transform/cross-model-sanitizer";
@@ -588,7 +588,13 @@ export function prepareAntigravityRequest(input, init, accessToken, projectId, e
     }
     const [, rawModel = "", rawAction = ""] = match;
     const requestedModel = rawModel;
-    const resolved = resolveModelForHeaderStyle(rawModel, headerStyle);
+    // The level the caller asked for reaches the body as a variant patch, not on the model
+    // id, so it is read back out here. Model resolution needs it: the per-tier Flash sku
+    // names the level, and without it every level would resolve to the same sku.
+    const requestedLevel = peekThinkingLevel(baseInit.body);
+    const resolved = resolveModelForHeaderStyle(rawModel, headerStyle, {
+        thinkingLevel: requestedLevel,
+    });
     let effectiveModel = resolved.actualModel;
     const streaming = rawAction === STREAM_ACTION;
     const defaultEndpoint = headerStyle === "gemini-cli" ? GEMINI_CLI_ENDPOINT : ANTIGRAVITY_ENDPOINT;
@@ -768,7 +774,7 @@ export function prepareAntigravityRequest(input, init, accessToken, projectId, e
                             // Gemini 3 uses thinkingLevel string (low/medium/high)
                             thinkingConfig = {
                                 includeThoughts: normalizedThinking.includeThoughts,
-                                thinkingLevel: tierThinkingLevel,
+                                thinkingLevel: tierThinkingLevel.toUpperCase(),
                             };
                         }
                         else {

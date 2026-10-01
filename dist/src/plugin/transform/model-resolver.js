@@ -177,6 +177,19 @@ function isGemini3FlashModel(model) {
  * @param options - Optional configuration including cli_first preference
  * @returns Resolved model with thinking configuration
  */
+/**
+ * The level to put in a per-tier Flash sku name, or undefined when there is not one.
+ *
+ * The sku names the level, so only the levels that have a sku can be returned. minimal is
+ * served by the low sku.
+ */
+function resolveFlashSkuLevel(level) {
+    if (level === "low" || level === "medium" || level === "high")
+        return level;
+    if (level === "minimal")
+        return "low";
+    return undefined;
+}
 export function resolveModelWithTier(requestedModel, options = {}) {
     const isAntigravity = QUOTA_PREFIX_REGEX.test(requestedModel);
     const modelWithoutQuota = requestedModel.replace(QUOTA_PREFIX_REGEX, "");
@@ -191,15 +204,23 @@ export function resolveModelWithTier(requestedModel, options = {}) {
     const explicitQuota = isAntigravity || isImageModel;
     const isGemini3 = modelWithoutQuota.toLowerCase().startsWith("gemini-3");
     const skipAlias = isAntigravity && isGemini3;
-    // 3.6/3.7/3.8 Flash: always resolve to -tiered + thinkingLevel.
+    // 3.6/3.7/3.8 Flash: resolve to the per-tier sku for the requested level.
     // Do this before skipAlias so antigravity-gemini-3.7-flash-medium works too.
+    //
+    // The per-tier sku names the level, so it has to follow the level that was asked for.
+    // The level reaches here from the variant's thinkingConfig, since the catalog carries
+    // one model per family and no suffix on the id.
     if (isTieredFlashModel(baseName) && quotaPreference === "antigravity" && !isImageModel) {
         const flashBase = baseName.replace(/-tiered$/i, "");
-        const level = tier === "low" || tier === "medium" || tier === "high"
-            ? tier
-            : TIERED_FLASH_DEFAULT_LEVEL;
+        // Only these three have a sku. The model-name suffix is checked first because an id
+        // that names a level is unambiguous; only then the level the request carries.
+        //
+        // minimal has no sku of its own and is served by the low one, and anything that is
+        // not a level we can ask for falls back to the default rather than becoming part of
+        // a model id the gateway has never heard of.
+        const level = resolveFlashSkuLevel(tier) ?? resolveFlashSkuLevel(options.thinkingLevel) ?? TIERED_FLASH_DEFAULT_LEVEL;
         return {
-            actualModel: `${flashBase}-tiered`,
+            actualModel: `${flashBase}-${level}`,
             thinkingLevel: level,
             tier: level,
             isThinkingModel: true,
@@ -326,11 +347,11 @@ function budgetToGemini3Level(budget) {
  * - gemini-3-pro-preview (gemini-cli) → gemini-3-pro-low (antigravity)
  * - gemini-3-flash (antigravity) → gemini-3-flash-preview (gemini-cli)
  */
-export function resolveModelForHeaderStyle(requestedModel, headerStyle) {
+export function resolveModelForHeaderStyle(requestedModel, headerStyle, options = {}) {
     const lower = requestedModel.toLowerCase();
     const isGemini3 = lower.includes("gemini-3");
     if (!isGemini3) {
-        return resolveModelWithTier(requestedModel);
+        return resolveModelWithTier(requestedModel, options);
     }
     if (headerStyle === "antigravity") {
         let transformedModel = requestedModel
@@ -345,7 +366,7 @@ export function resolveModelForHeaderStyle(requestedModel, headerStyle) {
             transformedModel = `${transformedModel}-low`;
         }
         const prefixedModel = `antigravity-${transformedModel}`;
-        return resolveModelWithTier(prefixedModel);
+        return resolveModelWithTier(prefixedModel, options);
     }
     if (headerStyle === "gemini-cli") {
         let transformedModel = requestedModel
@@ -356,11 +377,11 @@ export function resolveModelForHeaderStyle(requestedModel, headerStyle) {
             transformedModel = `${transformedModel}-preview`;
         }
         return {
-            ...resolveModelWithTier(transformedModel),
+            ...resolveModelWithTier(transformedModel, options),
             quotaPreference: "gemini-cli",
         };
     }
-    return resolveModelWithTier(requestedModel);
+    return resolveModelWithTier(requestedModel, options);
 }
 /**
  * Resolves model with variant config from providerOptions.
